@@ -27,3 +27,8 @@ seaborn==0.13.0
 
 # 5. 其他辅助工具 (Utilities)
 PyYAML==6.0.1
+
+# Optional robot simulator bridge. CoppeliaSim also ships the same client in
+# programming/zmqRemoteApi/clients/python, which can be used instead.
+coppeliasim-zmqremoteapi-client
+Pillow==10.1.0

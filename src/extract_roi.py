@@ -41,34 +41,32 @@ def extract_3d_cube(itk_image, pos_x, pos_y, pos_z, cube_size=32):
     根据融合后的三维物理空间坐标，在整体体数据中裁剪出 32x32x32 的局部结节立方体，
     并原地完成医疗标准的 HU 窗口值归一化。
     """
-    try:
-        origin = itk_image.GetOrigin()
-        spacing = itk_image.GetSpacing()
-        img_array = sitk.GetArrayFromImage(itk_image) # 矩阵形状: (Z, Y, X)
-        
-        # 物理空间绝对坐标 转换为 矩阵的像素索引
-        z_index = int(round((pos_z - origin[2]) / spacing[2]))
-        x_index = int(round(pos_x))
-        y_index = int(round(pos_y))
-        
-        half_size = cube_size // 2
-        z_start, z_end = z_index - half_size, z_index + half_size
-        y_start, y_end = y_index - half_size, y_index + half_size
-        x_start, x_end = x_index - half_size, x_index + half_size
-        
-        max_z, max_y, max_x = img_array.shape
-        # 越界安全保护
-        if z_start < 0 or y_start < 0 or x_start < 0 or z_end > max_z or y_end > max_y or x_end > max_x:
-            return None
-            
-        cube = img_array[z_start:z_end, y_start:y_end, x_start:x_end]
-        
-        # 肺窗 HU 值截断 [-1000, 400] 并线性归一化到 [0, 1] 供神经网络读取
-        cube = np.clip(cube, -1000.0, 400.0)
-        cube = (cube - (-1000.0)) / (400.0 - (-1000.0))
-        return cube.astype(np.float32)
-    except:
+    if cube_size <= 0 or cube_size % 2 != 0:
+        raise ValueError("cube_size must be a positive even number")
+
+    img_array = sitk.GetArrayFromImage(itk_image)  # Array order: (Z, Y, X)
+
+    # SimpleITK is authoritative here: it applies origin, spacing, and direction.
+    # Treating physical X/Y values as voxel indices silently extracts the wrong lesion
+    # whenever the scan origin or spacing is not zero/one.
+    physical_point = (float(pos_x), float(pos_y), float(pos_z))
+    x_index, y_index, z_index = itk_image.TransformPhysicalPointToIndex(physical_point)
+
+    half_size = cube_size // 2
+    z_start, z_end = z_index - half_size, z_index + half_size
+    y_start, y_end = y_index - half_size, y_index + half_size
+    x_start, x_end = x_index - half_size, x_index + half_size
+
+    max_z, max_y, max_x = img_array.shape
+    if z_start < 0 or y_start < 0 or x_start < 0 or z_end > max_z or y_end > max_y or x_end > max_x:
         return None
+
+    cube = img_array[z_start:z_end, y_start:y_end, x_start:x_end]
+
+    # Lung-window normalization used by the supplied 32^3 checkpoints.
+    cube = np.clip(cube, -1000.0, 400.0)
+    cube = (cube + 1000.0) / 1400.0
+    return cube.astype(np.float32)
 
 # ==========================================
 # 🚀 多维标签并行挂载与 3D ROI 物理裁切

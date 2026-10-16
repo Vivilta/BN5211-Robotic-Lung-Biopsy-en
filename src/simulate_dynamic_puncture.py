@@ -94,7 +94,7 @@ def main():
     ax.set_xlim([150, 460])
     ax.set_ylim([-50, 320])
     ax.set_zlim([-260, 50])
-    fig.suptitle("Dynamic Robotic Lung Biopsy Simulation (Patient LIDC-IDRI-0037)\nReal-Time Intercostal Needle Insertion", 
+    fig.suptitle("CONCEPT-ONLY Animation (not a CoppeliaSim robot simulation)\nRigidly translated arm illustration; no joint motion or collision validation",
                  fontsize=13, fontweight='bold', y=0.96)
     ax.set_xlabel("X (mm)", fontsize=10)
     ax.set_ylabel("Y (mm)", fontsize=10)
@@ -120,7 +120,7 @@ def main():
         robot_line.set_data(current_robot_pts[:, 0], current_robot_pts[:, 1])
         robot_line.set_3d_properties(current_robot_pts[:, 2])
 
-        status_text.set_text(f"Insertion Depth: {depth:.1f} mm / 60.0 mm\nPuncture Progress: {progress*100:.1f}%\nStatus: Collision-Free Tracking")
+        status_text.set_text(f"Illustration only\nInsertion visualization: {progress*100:.1f}%\nNo joint-level simulation or collision validation")
         return needle_line, robot_line, status_text
 
     print(">> 正在渲染动态仿真动画并导出 GIF (请稍候几秒)...")

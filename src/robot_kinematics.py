@@ -2,6 +2,8 @@ import os
 import json
 import numpy as np
 
+from robot_geometry import rotation_from_z_axis
+
 class UR5Kinematics:
     """
     UR5 6-DOF 机械臂运动学求解器 (基于标准 DH 参数)
@@ -32,7 +34,15 @@ class UR5Kinematics:
             T = np.dot(T, T_i)
         return T
 
-    def solve_ik_numerical(self, target_pose, initial_q=None, max_iters=200, tol=1e-3):
+    def solve_ik_numerical(
+        self,
+        target_pose,
+        initial_q=None,
+        max_iters=300,
+        tol=0.5,
+        orientation_tol=1e-3,
+        orientation_weight_mm=100.0,
+    ):
         """
         阻尼最小二乘法 (Damped Least Squares / Levenberg-Marquardt) 数值逆运动学求解
         target_pose: 4x4 目标齐次变换矩阵
@@ -62,8 +72,8 @@ class UR5Kinematics:
                 rot_err_mat[1, 0] - rot_err_mat[0, 1]
             ])
 
-            err = np.hstack([pos_err, rot_err * 50.0])  # 权衡位置与姿态权重
-            if np.linalg.norm(pos_err) < tol:
+            err = np.hstack([pos_err, rot_err * orientation_weight_mm])
+            if np.linalg.norm(pos_err) <= tol and np.linalg.norm(rot_err) <= orientation_tol:
                 return q, True, np.linalg.norm(pos_err)
 
             # 数值微分计算雅可比矩阵 (Jacobian)
@@ -82,7 +92,7 @@ class UR5Kinematics:
                     R_diff[0, 2] - R_diff[2, 0],
                     R_diff[1, 0] - R_diff[0, 1]
                 ]) / delta
-                J[:, j] = np.hstack([dp, dw * 50.0])
+                J[:, j] = np.hstack([dp, dw * orientation_weight_mm])
 
             # 阻尼最小二乘更新关节角
             damping = 1e-2
@@ -91,34 +101,41 @@ class UR5Kinematics:
 
             q += dq
             # 限制在 [-2pi, 2pi] 范围内
-            q = (q + np.pi) % (2 * np.pi) - np.pi
+            q = np.clip(q, -2.0 * np.pi, 2.0 * np.pi)
 
-        return q, False, np.linalg.norm(pos_err)
+        final_pose = self.forward_kinematics(q)
+        final_pos_err = np.linalg.norm(target_pose[:3, 3] - final_pose[:3, 3])
+        final_rot = target_pose[:3, :3] @ final_pose[:3, :3].T
+        final_rot_err = 0.5 * np.array([
+            final_rot[2, 1] - final_rot[1, 2],
+            final_rot[0, 2] - final_rot[2, 0],
+            final_rot[1, 0] - final_rot[0, 1],
+        ])
+        converged = final_pos_err <= tol and np.linalg.norm(final_rot_err) <= orientation_tol
+        return q, bool(converged), float(final_pos_err)
 
 
-def build_needle_pose(needle_tip, direction_vector):
+def build_needle_pose(needle_tip, direction_vector, needle_tip_offset_mm=0.0):
     """
     根据针尖物理坐标和刺入单位向量，构建末端执行器的 4x4 齐次变换矩阵
     默认设定机械臂末端 Z 轴对齐穿刺向量 direction_vector
     """
-    z_axis = np.array(direction_vector)
+    z_axis = np.asarray(direction_vector, dtype=float)
     z_axis = z_axis / np.linalg.norm(z_axis)
-
-    # 选取一个与 z 轴不平行的辅助向量构造坐标系
-    up = np.array([0.0, 0.0, 1.0])
-    if abs(np.dot(z_axis, up)) > 0.95:
-        up = np.array([1.0, 0.0, 0.0])
-
-    x_axis = np.cross(up, z_axis)
-    x_axis = x_axis / np.linalg.norm(x_axis)
-    y_axis = np.cross(z_axis, x_axis)
+    rotation = rotation_from_z_axis(z_axis)
 
     pose = np.eye(4)
-    pose[:3, 0] = x_axis
-    pose[:3, 1] = y_axis
-    pose[:3, 2] = z_axis
-    pose[:3, 3] = needle_tip
+    pose[:3, :3] = rotation
+    # The analytical DH chain ends at the tool flange/TCP. The needle tip is
+    # offset along the tool's local Z axis, so IK targets the flange position.
+    pose[:3, 3] = np.asarray(needle_tip, dtype=float) - rotation[:, 2] * float(needle_tip_offset_mm)
     return pose
+
+
+def needle_tip_from_tcp_pose(tcp_pose, needle_tip_offset_mm=0.0):
+    """Recover the physical needle tip from a TCP pose."""
+    tcp_pose = np.asarray(tcp_pose, dtype=float)
+    return tcp_pose[:3, 3] + tcp_pose[:3, 2] * float(needle_tip_offset_mm)
 
 
 def main():
@@ -158,7 +175,8 @@ def main():
 
     # 4. 正运动学校验与计算 Targeting Error (提案第 5 节关键指标)
     fk_result = ur5.forward_kinematics(joint_angles)
-    simulated_tip_pos = fk_result[:3, 3]
+    needle_tip_offset_mm = float(plan_data.get("needle_tip_offset_mm_for_analytical_dh", 0.0))
+    simulated_tip_pos = needle_tip_from_tcp_pose(fk_result, needle_tip_offset_mm)
 
     # 欧氏距离 (Euclidean Distance)
     targeting_error = np.linalg.norm(simulated_tip_pos - target_pt)
@@ -179,6 +197,7 @@ def main():
         "targeting_error_mm": float(targeting_error),
         "ik_converged": bool(converged)
     }
+    os.makedirs(os.path.dirname(out_kinematics_file), exist_ok=True)
     with open(out_kinematics_file, "w", encoding="utf-8") as f:
         json.dump(result_data, f, indent=4)
     print(f"🎉 运动学执行结果已保存至: {out_kinematics_file}")

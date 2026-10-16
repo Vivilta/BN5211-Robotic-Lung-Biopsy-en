@@ -34,9 +34,14 @@ class BiopsyTrajectoryPlanner:
     """
     经皮肺穿刺轨迹规划器：负责入针点搜索与直线避障
     """
-    def __init__(self, obstacles_json_path):
+    def __init__(self, obstacles_json_path, safety_margin_mm=2.0):
+        if not os.path.isfile(obstacles_json_path):
+            raise FileNotFoundError(f"Obstacle JSON not found: {obstacles_json_path}")
         with open(obstacles_json_path, 'r', encoding='utf-8') as f:
             self.obstacles = json.load(f)
+        if not isinstance(self.obstacles, list):
+            raise ValueError("Obstacle JSON must contain a list of AABB objects")
+        self.safety_margin_mm = float(safety_margin_mm)
         print(f"✅ 成功载入 {len(self.obstacles)} 个肋骨障碍物包围盒。")
 
     def check_collision(self, entry_pt, target_pt):
@@ -47,11 +52,11 @@ class BiopsyTrajectoryPlanner:
         target_pt = np.array(target_pt)
 
         for obs in self.obstacles:
-            box_min = np.array(obs['min_mm'])
-            box_max = np.array(obs['max_mm'])
+            box_min = np.asarray(obs['min_mm'], dtype=float)
+            box_max = np.asarray(obs['max_mm'], dtype=float)
 
-            # 增加 2mm 的手术安全余量 (Safety Margin)
-            safety_margin = 2.0
+            # Apply the configured planning margin in patient CT millimetres.
+            safety_margin = self.safety_margin_mm
             box_min -= safety_margin
             box_max += safety_margin
 
@@ -59,13 +64,156 @@ class BiopsyTrajectoryPlanner:
                 return True, obs['id']  # 发生碰撞，返回碰撞的肋骨 ID
         return False, None
 
+    def target_clearance_report(self, target_pt):
+        """Report obstacle AABBs that contain or approach the target point."""
+        target_pt = np.asarray(target_pt, dtype=float)
+        if target_pt.shape != (3,):
+            raise ValueError("target_pt must contain exactly three coordinates")
+
+        report = []
+        for obs in self.obstacles:
+            box_min = np.asarray(obs["min_mm"], dtype=float) - self.safety_margin_mm
+            box_max = np.asarray(obs["max_mm"], dtype=float) + self.safety_margin_mm
+            closest = np.maximum(box_min, np.minimum(target_pt, box_max))
+            distance = float(np.linalg.norm(target_pt - closest))
+            inside = bool(np.all(target_pt >= box_min) and np.all(target_pt <= box_max))
+            report.append(
+                {
+                    "obstacle_id": obs.get("id", "unnamed"),
+                    "distance_mm": distance,
+                    "contains_target": inside,
+                }
+            )
+        return sorted(report, key=lambda item: item["distance_mm"])
+
+    @staticmethod
+    def _sample_unit_directions(angular_step_deg):
+        """Deterministically sample outward directions on a sphere."""
+        if angular_step_deg <= 0 or angular_step_deg > 90:
+            raise ValueError("angular_step_deg must be in (0, 90]")
+        directions = []
+        elevations = np.arange(-90.0, 90.0 + angular_step_deg * 0.5, angular_step_deg)
+        azimuths = np.arange(0.0, 360.0, angular_step_deg)
+        for elevation_deg in elevations:
+            elevation = np.deg2rad(elevation_deg)
+            cos_elevation = np.cos(elevation)
+            for azimuth_deg in azimuths:
+                azimuth = np.deg2rad(azimuth_deg)
+                direction = np.array(
+                    [
+                        cos_elevation * np.cos(azimuth),
+                        cos_elevation * np.sin(azimuth),
+                        np.sin(elevation),
+                    ],
+                    dtype=float,
+                )
+                if not any(np.allclose(direction, existing) for existing in directions):
+                    directions.append(direction)
+        return directions
+
+    def plan_multidirectional(
+        self,
+        target_pt,
+        entry_distances_mm=(60.0, 80.0, 100.0),
+        angular_step_deg=15.0,
+        preferred_direction=None,
+        max_direction_deviation_deg=None,
+    ):
+        """Search straight-line entry paths from multiple patient-frame directions.
+
+        This is a geometry-only search. Without a body/skin surface model, the
+        sampled entry point is a radial point outside the target, not a verified
+        anatomical skin point. A future body-mask adapter can replace the radial
+        candidates without changing collision checking or scoring.
+        """
+        target_pt = np.asarray(target_pt, dtype=float)
+        if target_pt.shape != (3,) or not np.isfinite(target_pt).all():
+            raise ValueError("target_pt must contain three finite coordinates")
+        distances = np.asarray(tuple(entry_distances_mm), dtype=float)
+        if distances.size == 0 or np.any(distances <= 0):
+            raise ValueError("entry_distances_mm must contain positive values")
+
+        preferred = None
+        if preferred_direction is not None:
+            preferred = np.asarray(preferred_direction, dtype=float)
+            if preferred.shape != (3,) or not np.isfinite(preferred).all():
+                raise ValueError("preferred_direction must contain three finite values")
+            norm = np.linalg.norm(preferred)
+            if norm == 0:
+                raise ValueError("preferred_direction must be non-zero")
+            preferred = preferred / norm
+        if max_direction_deviation_deg is not None and not 0 < max_direction_deviation_deg <= 180:
+            raise ValueError("max_direction_deviation_deg must be in (0, 180]")
+
+        target_clearance = self.target_clearance_report(target_pt)
+        if target_clearance and target_clearance[0]["contains_target"]:
+            print(
+                "❌ 靶点落入安全裕量扩张后的障碍 AABB，拒绝生成轨迹: "
+                f"{target_clearance[0]['obstacle_id']}"
+            )
+            return None
+
+        directions = self._sample_unit_directions(angular_step_deg)
+        candidates = []
+        total_tested = 0
+        for outward in directions:
+            if preferred is not None:
+                deviation = np.rad2deg(np.arccos(np.clip(np.dot(outward, preferred), -1.0, 1.0)))
+                if max_direction_deviation_deg is not None and deviation > max_direction_deviation_deg:
+                    continue
+            else:
+                deviation = 0.0
+
+            for distance in distances:
+                total_tested += 1
+                entry_pt = target_pt + outward * distance
+                collision, hit_id = self.check_collision(entry_pt, target_pt)
+                if collision:
+                    continue
+                candidates.append(
+                    {
+                        "entry_point": entry_pt.tolist(),
+                        "path_length": float(distance),
+                        "vector": (-outward).tolist(),
+                        "entry_direction_outward": outward.tolist(),
+                        "planning_mode": "multi_direction_radial",
+                        "collision_free": True,
+                        "first_collision_obstacle": hit_id,
+                        "direction_deviation_deg": float(deviation),
+                    }
+                )
+
+        print("\n================ 多方向避障轨迹规划结果 ================")
+        print(f"评估候选轨迹总数: {total_tested}")
+        print(f"安全无碰撞轨迹数: {len(candidates)}")
+        success_rate = (len(candidates) / total_tested) * 100 if total_tested else 0.0
+        print(f"📈 候选轨迹安全成功率: {success_rate:.2f}%")
+        if not candidates:
+            print("❌ 未找到多方向无碰撞直线路径。")
+            return None
+
+        # Prefer the shortest needle path; use angular deviation only as a
+        # deterministic tie-breaker when a preferred clinical direction exists.
+        best_path = min(
+            candidates,
+            key=lambda item: (item["path_length"], item["direction_deviation_deg"]),
+        )
+        print(f">> 最优入针点: {[round(c, 2) for c in best_path['entry_point']]} mm")
+        print(f">> 穿刺深度: {best_path['path_length']:.2f} mm")
+        print("========================================================\n")
+        return best_path
+
     def plan_trajectory(self, target_pt, skin_y_coord=None, search_radius=40.0, step=5.0):
         """
         在靶点正前方的体表皮肤区域内网格搜索安全入针点
         target_pt: [x, y, z] mm
         skin_y_coord: 假定体表胸前壁的 Y 坐标 (如果为 None，默认靶点前方 60mm)
         """
-        target_pt = np.array(target_pt)
+        target_pt = np.asarray(target_pt, dtype=float)
+        if target_pt.shape != (3,):
+            raise ValueError("target_pt must contain exactly three coordinates")
+        if search_radius <= 0 or step <= 0:
+            raise ValueError("search_radius and step must be positive")
         
         # 胸壁皮肤大致位置（前胸入针）：Y 坐标比靶点靠前约 50-70mm
         if skin_y_coord is None:
@@ -121,13 +269,13 @@ class BiopsyTrajectoryPlanner:
 
 if __name__ == "__main__":
     # 载入刚才生成的肋骨障碍物
-    obs_file = r"F:\Lung-Nodule\data\demo_nodules\rib_obstacles_0037.json"
+    obs_file = r"data/demo_nodules/rib_obstacles_0037_segmented.json"
     
     # 患者 0037 的结节物理坐标
-    target_0037 = [407.46, 288.58, -163.50]
+    target_0037 = [118.275, 20.625, -163.50]
 
     planner = BiopsyTrajectoryPlanner(obs_file)
-    best_trajectory = planner.plan_trajectory(target_0037)
+    best_trajectory = planner.plan_multidirectional(target_0037)
 
     # 保存最优规划结果供下一阶段机械臂使用
     if best_trajectory is not None:
