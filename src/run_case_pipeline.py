@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -23,6 +24,7 @@ import numpy as np
 
 from environment_modeling import VirtualChestEnvironment
 from main_pipeline import run_end_to_end_biopsy_pipeline
+from robot_geometry import patient_to_robot_base_for_mount_height
 
 
 DEFAULT_CHECKPOINT = (
@@ -134,12 +136,12 @@ def _load_or_extract_obstacles(
     boxes = env.extract_local_rib_bounding_boxes(
         target_voxel=target_voxel,
         bone_hu_threshold=float(obstacle_options.get("bone_hu_threshold", 500.0)),
-        min_volume_voxels=int(obstacle_options.get("min_volume_voxels", 15)),
+        min_volume_voxels=int(obstacle_options.get("min_volume_voxels", 40)),
         x_min_offset_mm=float(obstacle_options.get("x_min_offset_mm", -35.0)),
         x_max_offset_mm=float(obstacle_options.get("x_max_offset_mm", 140.0)),
         y_half_range_mm=float(obstacle_options.get("y_half_range_mm", 150.0)),
         z_half_range_mm=float(obstacle_options.get("z_half_range_mm", 80.0)),
-        segment_slices=int(obstacle_options.get("segment_slices", 1)),
+        segment_slices=int(obstacle_options.get("segment_slices", 5)),
         exclude_target_roi_half_size_voxels=int(
             obstacle_options.get("exclude_target_roi_half_size_voxels", 16)
         ),
@@ -159,9 +161,40 @@ def run_case(
     skip_existing: bool = False,
     frame_delay: float = 0.08,
     confirm_coincident_demo_frame: bool = False,
+    output_dir_override: str | os.PathLike[str] | None = None,
+    scene_output_path: str | os.PathLike[str] | None = None,
+    coppeliasim_port_override: int | None = None,
+    needle_length_mm_override: float | None = None,
+    mount_height_mm_override: float | None = None,
+    segment_slices_override: int | None = None,
+    min_volume_voxels_override: int | None = None,
 ) -> dict[str, Any]:
     config_file = Path(config_path).expanduser().resolve()
     config = _select_case_config(_load_json(config_file), case_id)
+    if coppeliasim_port_override is not None:
+        if not 1 <= coppeliasim_port_override <= 65535:
+            raise ValueError("--coppeliasim-port must be between 1 and 65535")
+        config["coppeliasim_port"] = int(coppeliasim_port_override)
+    if needle_length_mm_override is not None:
+        if needle_length_mm_override <= 0:
+            raise ValueError("--needle-length-mm must be positive")
+        config["needle_length_mm"] = float(needle_length_mm_override)
+    if mount_height_mm_override is not None:
+        if mount_height_mm_override < 0:
+            raise ValueError("--mount-height-mm must be non-negative")
+        config["overhead_mount_height_mm"] = float(mount_height_mm_override)
+    if segment_slices_override is not None:
+        if segment_slices_override <= 0:
+            raise ValueError("--segment-slices must be positive")
+        config.setdefault("obstacle_extraction", {})["segment_slices"] = int(
+            segment_slices_override
+        )
+    if min_volume_voxels_override is not None:
+        if min_volume_voxels_override <= 0:
+            raise ValueError("--min-volume-voxels must be positive")
+        config.setdefault("obstacle_extraction", {})["min_volume_voxels"] = int(
+            min_volume_voxels_override
+        )
     repo_root = config_file.parent.parent if config_file.parent.name == "configs" else config_file.parent
 
     case_id = str(config.get("case_id", "")).strip()
@@ -186,14 +219,22 @@ def run_case(
     if not expected_uid:
         raise ValueError("series_instance_uid is required")
 
-    output_dir = _resolve_path(config.get("output_dir", "data/demo_nodules"), config_file, repo_root)
+    output_dir = (
+        Path(output_dir_override).expanduser().resolve()
+        if output_dir_override is not None
+        else _resolve_path(config.get("output_dir", "data/demo_nodules"), config_file, repo_root)
+    )
     assert output_dir is not None
     output_dir.mkdir(parents=True, exist_ok=True)
     obstacle_path = output_dir / f"rib_obstacles_{suffix}_segmented.json"
     preview_path = output_dir / f"rib_obstacles_{suffix}_segmented_preview.png"
     plan_path = output_dir / f"planned_trajectory_{suffix}.json"
     run_path = output_dir / f"coppeliasim_run_{suffix}_segmented.json"
-    scene_path = repo_root / "scenes" / f"robotic_lung_biopsy_{suffix}_segmented.ttt"
+    scene_path = (
+        Path(scene_output_path).expanduser().resolve()
+        if scene_output_path is not None
+        else repo_root / "scenes" / f"robotic_lung_biopsy_{suffix}_segmented.ttt"
+    )
     summary_path = output_dir / f"pipeline_summary_{suffix}.json"
 
     print(f"\n{'=' * 72}\n[CASE] {case_id}\n{'=' * 72}")
@@ -248,11 +289,38 @@ def run_case(
         patient_to_robot_base = np.eye(4, dtype=float)
         transform_mode = "coincident_demo_identity"
 
+    mount_height_mm = float(config.get("overhead_mount_height_mm", 200.0))
+    if mount_height_mm < 0:
+        raise ValueError("overhead_mount_height_mm must be non-negative")
+    if mount_height_mm and transform_mode == "measured_4x4":
+        raise ValueError(
+            "overhead_mount_height_mm is a demo-scene placement adjustment. "
+            "For a measured patient-to-robot transform, recalibrate after changing the mount."
+        )
+    if mount_height_mm:
+        patient_to_robot_base = patient_to_robot_base_for_mount_height(
+            patient_to_robot_base, mount_height_mm
+        )
+
     if skip_existing and plan_path.is_file():
         with plan_path.open("r", encoding="utf-8") as handle:
             plan = json.load(handle)
         if plan.get("decision") != "robot_plan_ready":
             raise ValueError(f"Existing plan is not executable: {plan_path}")
+        saved_transform = plan.get("coordinate_system", {}).get("patient_to_robot_base")
+        if saved_transform is None or not np.allclose(
+            np.asarray(saved_transform, dtype=float), patient_to_robot_base, atol=1e-8
+        ):
+            raise ValueError("Existing plan uses a different patient-to-robot transform; regenerate it")
+        expected_geometry = {
+            "needle_length_mm": float(config.get("needle_length_mm", 220.0)),
+            "needle_radius_mm": float(config.get("needle_radius_mm", 4.0)),
+            "additional_aabb_clearance_mm": float(config.get("planning_safety_margin_mm", 2.0)),
+            "approach_distance_mm": float(config.get("approach_distance_mm", 30.0)),
+            "checked_segment": "full needle shaft swept from pre-approach through target",
+        }
+        if plan.get("planning_geometry") != expected_geometry:
+            raise ValueError("Existing plan uses different needle clearance settings; regenerate it")
         print(f"[CASE] Reusing plan: {plan_path}")
     else:
         plan = run_end_to_end_biopsy_pipeline(
@@ -263,7 +331,7 @@ def run_case(
             malignancy_threshold=float(config.get("malignancy_threshold", 0.45)),
             output_plan_path=str(plan_path),
             patient_to_robot_base=patient_to_robot_base,
-            needle_tip_offset_mm=float(config.get("needle_tip_offset_mm", 0.0)),
+            needle_tip_offset_mm=float(config.get("needle_length_mm", 220.0)),
             force_robot_demo=bool(config.get("force_robot_demo", True)),
             patient_to_robot_transform_confirmed=True,
             patient_to_robot_transform_path=str(transform_path) if transform_path else None,
@@ -272,6 +340,12 @@ def run_case(
             planning_mode=str(config.get("planning_mode", "multi_direction")),
             entry_distances_mm=tuple(config.get("entry_distances_mm", [60.0, 80.0, 100.0])),
             angular_step_deg=float(config.get("angular_step_deg", 15.0)),
+            max_direction_deviation_deg=float(
+                config.get("max_direction_deviation_deg", 150.0)
+            ),
+            ik_initial_q=config.get("initial_ik_seed_rad"),
+            needle_radius_mm=float(config.get("needle_radius_mm", 4.0)),
+            planning_safety_margin_mm=float(config.get("planning_safety_margin_mm", 2.0)),
         )
     if plan.get("decision") != "robot_plan_ready":
         raise RuntimeError(f"Planning did not produce an executable plan: {plan.get('decision')}")
@@ -283,6 +357,12 @@ def run_case(
         from create_coppeliasim_scene import create_scene
         from coppeliasim_remote import run_remote_simulation
 
+        scene_initial_joint_angles = plan.get("analytical_ik", {}).get("joint_angles_rad")
+        if scene_initial_joint_angles is None:
+            scene_initial_joint_angles = config.get(
+                "initial_ik_seed_rad",
+                [0.0, -math.pi / 2, 0.0, -math.pi / 2, 0.0, 0.0],
+            )
         create_scene(
             output_path=str(scene_path),
             obstacle_path=str(obstacle_path),
@@ -290,6 +370,22 @@ def run_case(
             host=str(config.get("coppeliasim_host", "127.0.0.1")),
             port=int(config.get("coppeliasim_port", 23000)),
             patient_to_robot_transform=patient_to_robot_base,
+            initial_joint_angles_rad=tuple(scene_initial_joint_angles),
+            view_target_robot_base_mm=(
+                np.asarray(plan["target_point_robot_base_mm"], dtype=float) / 2.0
+            ).tolist(),
+            show_obstacles=bool(config.get("show_scene_obstacles", True)),
+            initial_tool_point_mm=plan.get("approach_point_robot_base_mm"),
+            initial_needle_axis=plan.get("needle_axis_robot_base"),
+            trajectory_points_mm=[
+                plan["approach_point_robot_base_mm"],
+                plan["entry_point_robot_base_mm"],
+                plan["target_point_robot_base_mm"],
+            ],
+            trajectory_steps=int(config.get("simulation_steps", 100)),
+            needle_length_mm=float(config.get("needle_length_mm", 220.0)),
+            mount_height_mm=mount_height_mm,
+            needle_radius_mm=float(config.get("needle_radius_mm", 4.0)),
         )
         simulation = run_remote_simulation(
             plan_path=str(plan_path),
@@ -323,6 +419,8 @@ def run_case(
         "scene_ttt": str(scene_path) if run_simulation else None,
         "simulation_json": str(run_path) if simulation is not None else None,
         "patient_to_robot_transform_mode": transform_mode,
+        "patient_position": config.get("patient_position", "not specified"),
+        "overhead_mount_height_mm": mount_height_mm,
         "planning_decision": plan.get("decision"),
         "malignancy_probability": plan.get("malignancy_probability"),
         "analytical_ik": plan.get("analytical_ik"),
@@ -340,6 +438,33 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--run-simulation", action="store_true", help="Generate .ttt and execute CoppeliaSim")
     parser.add_argument("--skip-existing", action="store_true", help="Reuse existing obstacle JSON and plan JSON")
     parser.add_argument("--frame-delay", type=float, default=0.08, help="Seconds between visible simulation frames")
+    parser.add_argument("--output-dir", help="Override the directory for generated case artifacts")
+    parser.add_argument("--scene-output", help="Override the generated CoppeliaSim .ttt path")
+    parser.add_argument(
+        "--coppeliasim-port",
+        type=int,
+        help="Override the CoppeliaSim ZeroMQ Remote API port for this run",
+    )
+    parser.add_argument(
+        "--needle-length-mm",
+        type=float,
+        help="Override needle length for this run; the plan and scene use the same value",
+    )
+    parser.add_argument(
+        "--mount-height-mm",
+        type=float,
+        help="Override overhead UR5 mount height for this run",
+    )
+    parser.add_argument(
+        "--segment-slices",
+        type=int,
+        help="Override the number of CT slices grouped into one obstacle segment",
+    )
+    parser.add_argument(
+        "--min-volume-voxels",
+        type=int,
+        help="Override the minimum voxel count for a bone candidate",
+    )
     parser.add_argument(
         "--confirm-coincident-demo-frame",
         action="store_true",
@@ -357,4 +482,11 @@ if __name__ == "__main__":
         skip_existing=args.skip_existing,
         frame_delay=args.frame_delay,
         confirm_coincident_demo_frame=args.confirm_coincident_demo_frame,
+        output_dir_override=args.output_dir,
+        scene_output_path=args.scene_output,
+        coppeliasim_port_override=args.coppeliasim_port,
+        needle_length_mm_override=args.needle_length_mm,
+        mount_height_mm_override=args.mount_height_mm,
+        segment_slices_override=args.segment_slices,
+        min_volume_voxels_override=args.min_volume_voxels,
     )

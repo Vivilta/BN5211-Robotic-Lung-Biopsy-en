@@ -34,7 +34,7 @@ class BiopsyTrajectoryPlanner:
     """
     经皮肺穿刺轨迹规划器：负责入针点搜索与直线避障
     """
-    def __init__(self, obstacles_json_path, safety_margin_mm=2.0):
+    def __init__(self, obstacles_json_path, safety_margin_mm=2.0, needle_radius_mm=0.0):
         if not os.path.isfile(obstacles_json_path):
             raise FileNotFoundError(f"Obstacle JSON not found: {obstacles_json_path}")
         with open(obstacles_json_path, 'r', encoding='utf-8') as f:
@@ -42,6 +42,10 @@ class BiopsyTrajectoryPlanner:
         if not isinstance(self.obstacles, list):
             raise ValueError("Obstacle JSON must contain a list of AABB objects")
         self.safety_margin_mm = float(safety_margin_mm)
+        self.needle_radius_mm = float(needle_radius_mm)
+        if self.safety_margin_mm < 0 or self.needle_radius_mm < 0:
+            raise ValueError("Safety margin and needle radius must be non-negative")
+        self.obstacle_inflation_mm = self.safety_margin_mm + self.needle_radius_mm
         print(f"✅ 成功载入 {len(self.obstacles)} 个肋骨障碍物包围盒。")
 
     def check_collision(self, entry_pt, target_pt):
@@ -56,7 +60,7 @@ class BiopsyTrajectoryPlanner:
             box_max = np.asarray(obs['max_mm'], dtype=float)
 
             # Apply the configured planning margin in patient CT millimetres.
-            safety_margin = self.safety_margin_mm
+            safety_margin = self.obstacle_inflation_mm
             box_min -= safety_margin
             box_max += safety_margin
 
@@ -72,8 +76,8 @@ class BiopsyTrajectoryPlanner:
 
         report = []
         for obs in self.obstacles:
-            box_min = np.asarray(obs["min_mm"], dtype=float) - self.safety_margin_mm
-            box_max = np.asarray(obs["max_mm"], dtype=float) + self.safety_margin_mm
+            box_min = np.asarray(obs["min_mm"], dtype=float) - self.obstacle_inflation_mm
+            box_max = np.asarray(obs["max_mm"], dtype=float) + self.obstacle_inflation_mm
             closest = np.maximum(box_min, np.minimum(target_pt, box_max))
             distance = float(np.linalg.norm(target_pt - closest))
             inside = bool(np.all(target_pt >= box_min) and np.all(target_pt <= box_max))
@@ -118,6 +122,8 @@ class BiopsyTrajectoryPlanner:
         angular_step_deg=15.0,
         preferred_direction=None,
         max_direction_deviation_deg=None,
+        approach_distance_mm=0.0,
+        needle_length_mm=0.0,
     ):
         """Search straight-line entry paths from multiple patient-frame directions.
 
@@ -132,6 +138,8 @@ class BiopsyTrajectoryPlanner:
         distances = np.asarray(tuple(entry_distances_mm), dtype=float)
         if distances.size == 0 or np.any(distances <= 0):
             raise ValueError("entry_distances_mm must contain positive values")
+        if approach_distance_mm < 0 or needle_length_mm < 0:
+            raise ValueError("approach_distance_mm and needle_length_mm must be non-negative")
 
         preferred = None
         if preferred_direction is not None:
@@ -167,12 +175,16 @@ class BiopsyTrajectoryPlanner:
             for distance in distances:
                 total_tested += 1
                 entry_pt = target_pt + outward * distance
-                collision, hit_id = self.check_collision(entry_pt, target_pt)
+                approach_pt = entry_pt + outward * float(approach_distance_mm)
+                needle_sweep_start = approach_pt + outward * float(needle_length_mm)
+                collision, hit_id = self.check_collision(needle_sweep_start, target_pt)
                 if collision:
                     continue
                 candidates.append(
                     {
                         "entry_point": entry_pt.tolist(),
+                        "approach_point": approach_pt.tolist(),
+                        "needle_sweep_start": needle_sweep_start.tolist(),
                         "path_length": float(distance),
                         "vector": (-outward).tolist(),
                         "entry_direction_outward": outward.tolist(),
@@ -203,7 +215,15 @@ class BiopsyTrajectoryPlanner:
         print("========================================================\n")
         return best_path
 
-    def plan_trajectory(self, target_pt, skin_y_coord=None, search_radius=40.0, step=5.0):
+    def plan_trajectory(
+        self,
+        target_pt,
+        skin_y_coord=None,
+        search_radius=40.0,
+        step=5.0,
+        approach_distance_mm=0.0,
+        needle_length_mm=0.0,
+    ):
         """
         在靶点正前方的体表皮肤区域内网格搜索安全入针点
         target_pt: [x, y, z] mm
@@ -214,6 +234,8 @@ class BiopsyTrajectoryPlanner:
             raise ValueError("target_pt must contain exactly three coordinates")
         if search_radius <= 0 or step <= 0:
             raise ValueError("search_radius and step must be positive")
+        if approach_distance_mm < 0 or needle_length_mm < 0:
+            raise ValueError("approach_distance_mm and needle_length_mm must be non-negative")
         
         # 胸壁皮肤大致位置（前胸入针）：Y 坐标比靶点靠前约 50-70mm
         if skin_y_coord is None:
@@ -236,13 +258,19 @@ class BiopsyTrajectoryPlanner:
 
                 entry_pt = np.array([x, skin_y_coord, z])
                 total_tested += 1
-
-                is_collision, hit_id = self.check_collision(entry_pt, target_pt)
                 path_length = np.linalg.norm(entry_pt - target_pt)
+                if path_length <= 0:
+                    continue
+                direction = (target_pt - entry_pt) / path_length
+                approach_pt = entry_pt - direction * float(approach_distance_mm)
+                needle_sweep_start = approach_pt - direction * float(needle_length_mm)
+                is_collision, hit_id = self.check_collision(needle_sweep_start, target_pt)
 
                 if not is_collision:
                     collision_free_paths.append({
                         "entry_point": entry_pt.tolist(),
+                        "approach_point": approach_pt.tolist(),
+                        "needle_sweep_start": needle_sweep_start.tolist(),
                         "path_length": path_length,
                         "vector": ((target_pt - entry_pt) / path_length).tolist()
                     })

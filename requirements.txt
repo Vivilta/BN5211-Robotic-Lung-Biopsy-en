@@ -32,3 +32,4 @@ PyYAML==6.0.1
 # programming/zmqRemoteApi/clients/python, which can be used instead.
 coppeliasim-zmqremoteapi-client
 Pillow==10.1.0
+streamlit>=1.39,<2

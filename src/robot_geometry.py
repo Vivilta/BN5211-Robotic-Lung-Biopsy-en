@@ -44,6 +44,22 @@ def identity_transform():
     return np.eye(4, dtype=float)
 
 
+def overhead_mount_base_to_world(mount_height_mm=0.0):
+    """UR5 base frame for a ceiling mount, expressed in scene millimetres."""
+    transform = np.eye(4, dtype=float)
+    transform[:3, :3] = np.diag([1.0, -1.0, -1.0])
+    transform[2, 3] = float(mount_height_mm)
+    return transform
+
+
+def patient_to_robot_base_for_mount_height(patient_to_robot_base, mount_height_mm):
+    """Re-express a demo patient transform for a vertically shifted ceiling mount."""
+    transform = as_homogeneous_transform(patient_to_robot_base)
+    old_base_to_world = overhead_mount_base_to_world()
+    new_base_to_world = overhead_mount_base_to_world(mount_height_mm)
+    return np.linalg.inv(new_base_to_world) @ old_base_to_world @ transform
+
+
 def rotation_from_z_axis(z_axis):
     """Build a right-handed rotation whose local Z axis is ``z_axis``."""
     z_axis = np.asarray(z_axis, dtype=float)
@@ -59,6 +75,18 @@ def rotation_from_z_axis(z_axis):
     x_axis /= np.linalg.norm(x_axis)
     y_axis = np.cross(z_axis, x_axis)
     return np.column_stack((x_axis, y_axis, z_axis))
+
+
+def rotation_with_z_axis_roll(z_axis, roll_rad):
+    """Rotate a tool frame around its local Z axis without changing needle direction."""
+    roll = float(roll_rad)
+    cosine = np.cos(roll)
+    sine = np.sin(roll)
+    local_roll = np.array(
+        [[cosine, -sine, 0.0], [sine, cosine, 0.0], [0.0, 0.0, 1.0]],
+        dtype=float,
+    )
+    return rotation_from_z_axis(z_axis) @ local_roll
 
 
 def rotation_to_quaternion_xyzw(rotation):
@@ -98,4 +126,23 @@ def rotation_to_quaternion_xyzw(rotation):
 
     quaternion = np.array([x, y, z, w], dtype=float)
     return quaternion / np.linalg.norm(quaternion)
+
+
+def quaternion_xyzw_to_rotation(quaternion):
+    """Convert a CoppeliaSim xyzw quaternion to a 3x3 rotation matrix."""
+    quaternion = np.asarray(quaternion, dtype=float)
+    if quaternion.shape != (4,):
+        raise ValueError(f"Expected a four-value quaternion, got {quaternion.shape}")
+    norm = np.linalg.norm(quaternion)
+    if norm == 0:
+        raise ValueError("Quaternion must be non-zero")
+    x, y, z, w = quaternion / norm
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=float,
+    )
 

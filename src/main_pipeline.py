@@ -87,6 +87,10 @@ def run_end_to_end_biopsy_pipeline(
     planning_mode="multi_direction",
     entry_distances_mm=(60.0, 80.0, 100.0),
     angular_step_deg=15.0,
+    max_direction_deviation_deg=150.0,
+    ik_initial_q=None,
+    needle_radius_mm=4.0,
+    planning_safety_margin_mm=2.0,
 ):
     """Run inference, straight-line planning, and analytical FK/IK checks.
 
@@ -132,6 +136,13 @@ def run_end_to_end_biopsy_pipeline(
             if patient_to_robot_transform_path else None
         ),
         "target_point_patient_mm": target_patient.tolist(),
+        "planning_geometry": {
+            "needle_length_mm": float(needle_tip_offset_mm),
+            "needle_radius_mm": float(needle_radius_mm),
+            "additional_aabb_clearance_mm": float(planning_safety_margin_mm),
+            "approach_distance_mm": float(approach_distance_mm),
+            "checked_segment": "full needle shaft swept from pre-approach through target",
+        },
         "target_roi_match_confirmed": bool(target_roi_match_confirmed),
         "target_roi_binding": {
             "roi_path": os.path.abspath(roi_cube_path),
@@ -172,17 +183,27 @@ def run_end_to_end_biopsy_pipeline(
             _write_json(output_plan_path, result)
         return result
 
-    planner = BiopsyTrajectoryPlanner(obstacles_json_path)
+    planner = BiopsyTrajectoryPlanner(
+        obstacles_json_path,
+        safety_margin_mm=planning_safety_margin_mm,
+        needle_radius_mm=needle_radius_mm,
+    )
     if planning_mode == "multi_direction":
         best_path = planner.plan_multidirectional(
             target_patient,
             entry_distances_mm=entry_distances_mm,
             angular_step_deg=angular_step_deg,
             preferred_direction=[0.0, -1.0, 0.0],
-            max_direction_deviation_deg=150.0,
+            max_direction_deviation_deg=max_direction_deviation_deg,
+            approach_distance_mm=approach_distance_mm,
+            needle_length_mm=needle_tip_offset_mm,
         )
     elif planning_mode == "fixed_y":
-        best_path = planner.plan_trajectory(target_patient)
+        best_path = planner.plan_trajectory(
+            target_patient,
+            approach_distance_mm=approach_distance_mm,
+            needle_length_mm=needle_tip_offset_mm,
+        )
     else:
         raise ValueError("planning_mode must be 'multi_direction' or 'fixed_y'")
     if best_path is None:
@@ -205,7 +226,10 @@ def run_end_to_end_biopsy_pipeline(
         needle_tip_offset_mm=needle_tip_offset_mm,
     )
     ur5 = UR5Kinematics()
-    joint_angles, ik_converged, ik_position_error = ur5.solve_ik_numerical(target_pose_robot)
+    joint_angles, ik_converged, ik_position_error = ur5.solve_ik_numerical(
+        target_pose_robot,
+        initial_q=ik_initial_q,
+    )
     fk_pose = ur5.forward_kinematics(joint_angles)
     fk_tip = needle_tip_from_tcp_pose(fk_pose, needle_tip_offset_mm)
     targeting_error = float(np.linalg.norm(fk_tip - target_robot))

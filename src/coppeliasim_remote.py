@@ -14,7 +14,11 @@ from pathlib import Path
 
 import numpy as np
 
-from robot_geometry import rotation_from_z_axis, rotation_to_quaternion_xyzw
+from robot_geometry import (
+    quaternion_xyzw_to_rotation,
+    rotation_from_z_axis,
+    rotation_to_quaternion_xyzw,
+)
 
 
 DEFAULT_INITIAL_JOINT_ANGLES_RAD = (0.0, -math.pi / 2.0, 0.0, -math.pi / 2.0, 0.0, 0.0)
@@ -89,9 +93,56 @@ def _joint_handles(sim, base_handle, paths):
     return handles
 
 
-def _target_pose_mm(point_mm, axis):
-    rotation = rotation_from_z_axis(axis)
-    quaternion = rotation_to_quaternion_xyzw(rotation)
+def _ensure_self_collision_collections(sim, robot_handle, joints):
+    """Recreate tool/arm collections when scene reloads drop runtime collections."""
+    try:
+        needle_collection = sim.getCollectionHandle("needleCollision")
+    except Exception:
+        needle_collection = None
+    try:
+        arm_collection = sim.getCollectionHandle("robotArmClearance")
+    except Exception:
+        arm_collection = None
+    if needle_collection is not None and arm_collection is not None:
+        return needle_collection, arm_collection
+
+    shapes = sim.getObjectsInTree(robot_handle, sim.object_shape_type, 0)
+    needle_shapes = [
+        shape
+        for shape in shapes
+        if sim.getObjectAlias(shape, 4).split("__")[0] == "needle"
+    ]
+    if len(needle_shapes) != 1:
+        raise RuntimeError(
+            f"Expected one UR5 needle shape for self-collision checks, found {len(needle_shapes)}"
+        )
+    needle = needle_shapes[0]
+    wrist_shapes = set(sim.getObjectsInTree(joints[-1], sim.object_shape_type, 0))
+
+    if needle_collection is None:
+        needle_collection = sim.createCollection(0)
+        sim.setCollectionName(needle_collection, "needleCollision")
+        sim.addItemToCollection(needle_collection, sim.handle_single, needle, 0)
+    if arm_collection is None:
+        arm_collection = sim.createCollection(0)
+        sim.setCollectionName(arm_collection, "robotArmClearance")
+        for shape in shapes:
+            if shape != needle and shape not in wrist_shapes:
+                sim.addItemToCollection(arm_collection, sim.handle_single, shape, 0)
+    return needle_collection, arm_collection
+
+
+def _target_pose_mm(point_mm, axis, orientation_quaternion=None):
+    if orientation_quaternion is None:
+        rotation = rotation_from_z_axis(axis)
+        quaternion = rotation_to_quaternion_xyzw(rotation)
+    else:
+        quaternion = np.asarray(orientation_quaternion, dtype=float)
+        rotation = quaternion_xyzw_to_rotation(quaternion)
+        normalized_axis = np.asarray(axis, dtype=float)
+        normalized_axis /= np.linalg.norm(normalized_axis)
+        if not np.allclose(rotation[:, 2], normalized_axis, atol=1e-5):
+            raise ValueError("Scene IK target axis does not match the planned needle axis")
     point_m = np.asarray(point_mm, dtype=float) / 1000.0
     return point_m.tolist() + quaternion.tolist()
 
@@ -99,8 +150,48 @@ def _target_pose_mm(point_mm, axis):
 def _ik_status_ok(sim_ik, status):
     if isinstance(status, (list, tuple)):
         status = status[0]
-    success = getattr(sim_ik, "result_success", 0)
-    return status == success or status == 0
+    success = getattr(sim_ik, "result_success", 1)
+    return status == success
+
+
+def _collision_object_names(sim, collision_result):
+    """Return the colliding object aliases when checkCollision provides them."""
+    if not isinstance(collision_result, (list, tuple)) or len(collision_result) < 2:
+        return []
+    handles = []
+
+    def collect_handles(value):
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                collect_handles(item)
+        elif isinstance(value, (int, np.integer)) and not isinstance(value, bool):
+            handles.append(int(value))
+
+    for value in collision_result[1:]:
+        collect_handles(value)
+    if len(handles) < 2:
+        return []
+    names = []
+    for handle in handles[:2]:
+        try:
+            names.append(sim.getObjectAlias(handle, 4))
+        except Exception:
+            names.append(str(handle))
+    return names
+
+
+def _colliding_patient_obstacles(sim, robot_collection, obstacle_handles):
+    """Probe individual patient shapes when collection collision omits object IDs."""
+    colliding = []
+    for handle in obstacle_handles:
+        result = sim.checkCollision(robot_collection, handle)
+        hit = bool(result[0]) if isinstance(result, (list, tuple)) else bool(result)
+        if hit:
+            try:
+                colliding.append(sim.getObjectAlias(handle, 4))
+            except Exception:
+                colliding.append(str(handle))
+    return colliding
 
 
 def _polyline_samples(points, total_steps):
@@ -216,6 +307,7 @@ def run_remote_simulation(
     joints = _joint_handles(sim, base_handle, joint_paths)
 
     collision_pair = None
+    needle_self_collision_pair = None
     if robot_collision_collection and environment_collision_collection:
         collision_pair = (
             _ensure_collection(sim, robot_collision_collection, root_handle=base_handle),
@@ -225,6 +317,9 @@ def run_remote_simulation(
                 object_handles=_patient_obstacle_handles(sim),
             ),
         )
+        needle_self_collision_pair = _ensure_self_collision_collections(
+            sim, base_handle, joints
+        )
     elif not allow_no_collision_check:
         raise RuntimeError(
             "Collision collections are required. Pass --robot-collision-collection and "
@@ -232,17 +327,17 @@ def run_remote_simulation(
         )
 
     if kinematic_only:
-        initial_joint_angles_rad = (
-            DEFAULT_INITIAL_JOINT_ANGLES_RAD
-            if initial_joint_angles_rad is None
-            else tuple(initial_joint_angles_rad)
-        )
-        if len(initial_joint_angles_rad) != 6:
-            raise ValueError("initial_joint_angles_rad must contain exactly six values")
+        # Scene generation can solve and save the planned approach pose. Keep
+        # that pose by default; resetting to the generic home angles here
+        # creates a large, non-trajectory swing before insertion begins.
         for joint in joints:
             sim.setJointMode(joint, sim.jointmode_kinematic, 0)
-        for joint, angle in zip(joints, initial_joint_angles_rad):
-            sim.setJointPosition(joint, float(angle))
+        if initial_joint_angles_rad is not None:
+            initial_joint_angles_rad = tuple(initial_joint_angles_rad)
+            if len(initial_joint_angles_rad) != 6:
+                raise ValueError("initial_joint_angles_rad must contain exactly six values")
+            for joint, angle in zip(joints, initial_joint_angles_rad):
+                sim.setJointPosition(joint, float(angle))
 
     ik_env = sim_ik.createEnvironment()
     ik_group = sim_ik.createGroup(ik_env)
@@ -274,8 +369,17 @@ def run_remote_simulation(
             raise ValueError(f"Plan field {name} must contain three finite numbers")
     if np.linalg.norm(axis) <= 1e-9:
         raise ValueError("Plan field needle_axis_robot_base must be non-zero")
+    scene_target_pose = sim.getObjectPose(target_handle, base_handle)
+    scene_target_quaternion = np.asarray(scene_target_pose[3:7], dtype=float)
+    scene_target_rotation = quaternion_xyzw_to_rotation(scene_target_quaternion)
+    normalized_axis = axis / np.linalg.norm(axis)
+    if not np.allclose(scene_target_rotation[:, 2], normalized_axis, atol=1e-5):
+        scene_target_quaternion = rotation_to_quaternion_xyzw(
+            rotation_from_z_axis(normalized_axis)
+        )
     errors_mm = []
     collision_frames = []
+    needle_self_collision_frames = []
     ik_statuses = []
     result = {
         "plan_path": os.path.abspath(plan_path),
@@ -284,7 +388,9 @@ def run_remote_simulation(
         "steps": steps,
         "executed_steps": None,
         "collision_check_available": collision_pair is not None,
+        "needle_self_collision_check_available": needle_self_collision_pair is not None,
         "collision_free": None,
+        "needle_self_collision_free": None,
         "kinematic_only": bool(kinematic_only),
         "max_tip_position_error_mm": None,
         "final_tip_position_error_mm": None,
@@ -296,7 +402,7 @@ def run_remote_simulation(
         if not kinematic_only:
             sim.startSimulation()
             started = True
-        initial_pose = sim.getObjectPose(tip_handle, -1)
+        initial_pose = sim.getObjectPose(tip_handle, base_handle)
         initial_tip = np.asarray(initial_pose[:3], dtype=float) * 1000.0
         if kinematic_only:
             # A stock UR5 may start far from the patient and with a different
@@ -333,14 +439,43 @@ def run_remote_simulation(
             for phase in dict.fromkeys(phases)
         }
 
+        initial_target_pose = _target_pose_mm(waypoints[0], axis, scene_target_quaternion)
+        initial_position_error_mm = float(
+            np.linalg.norm(np.asarray(initial_pose[:3]) - np.asarray(initial_target_pose[:3]))
+            * 1000.0
+        )
+        initial_quaternion = np.asarray(initial_pose[3:7], dtype=float)
+        target_quaternion = np.asarray(initial_target_pose[3:7], dtype=float)
+        quaternion_dot = float(
+            np.clip(abs(np.dot(initial_quaternion, target_quaternion)), 0.0, 1.0)
+        )
+        initial_orientation_error_deg = math.degrees(2.0 * math.acos(quaternion_dot))
+        result["initial_target_position_error_mm"] = initial_position_error_mm
+        result["initial_target_orientation_error_deg"] = initial_orientation_error_deg
+        if kinematic_only and (
+            initial_position_error_mm > 5.0 or initial_orientation_error_deg > 5.0
+        ):
+            raise RuntimeError(
+                "Saved scene posture is not at the planned pre-approach pose; refusing an "
+                "unplanned initial swing. Regenerate the scene and verify its saved UR5 pose. "
+                f"position_error_mm={initial_position_error_mm:.3f}, "
+                f"orientation_error_deg={initial_orientation_error_deg:.3f}"
+            )
+
         for frame, (desired_tip, phase) in enumerate(zip(waypoints, phases)):
-            if phase == "initial":
-                # The first point is the measured scene state, not an IK
-                # command. Solving a 180-degree orientation change here can
-                # fail even though the subsequent path is reachable.
+            if frame == 0 and kinematic_only:
+                # Scene generation already solved this exact pre-approach pose.
+                # Re-solving can select another equivalent UR5 branch and cause
+                # a large, unnecessary joint-space swing before the planned path.
+                ik_statuses.append("saved_pre_approach_pose")
+            elif phase == "initial":
                 ik_statuses.append("initial_pose")
             else:
-                sim.setObjectPose(target_handle, -1, _target_pose_mm(desired_tip, axis))
+                sim.setObjectPose(
+                    target_handle,
+                    base_handle,
+                    _target_pose_mm(desired_tip, axis, scene_target_quaternion),
+                )
                 status = sim_ik.handleGroup(ik_env, ik_group, {"syncWorlds": True})
                 ik_statuses.append(status)
                 if not _ik_status_ok(sim_ik, status):
@@ -348,7 +483,7 @@ def run_remote_simulation(
 
             if not kinematic_only:
                 sim.step()
-            actual_pose = sim.getObjectPose(tip_handle, -1)
+            actual_pose = sim.getObjectPose(tip_handle, base_handle)
             actual_tip_mm = np.asarray(actual_pose[:3], dtype=float) * 1000.0
             error_mm = float(np.linalg.norm(actual_tip_mm - desired_tip))
             errors_mm.append(error_mm)
@@ -358,7 +493,37 @@ def run_remote_simulation(
                 collision = bool(collision_result[0]) if isinstance(collision_result, (list, tuple)) else bool(collision_result)
                 collision_frames.append(frame if collision else None)
                 if collision:
-                    raise RuntimeError(f"Collision detected during {phase} at frame {frame}")
+                    colliding_objects = _collision_object_names(sim, collision_result)
+                    if not colliding_objects:
+                        colliding_objects = _colliding_patient_obstacles(
+                            sim,
+                            collision_pair[0],
+                            _patient_obstacle_handles(sim),
+                        )
+                    object_detail = (
+                        f"; objects={colliding_objects}" if colliding_objects else ""
+                    )
+                    raise RuntimeError(
+                        f"Collision detected during {phase} at frame {frame}"
+                        f"{object_detail}; collision_result={collision_result!r}; "
+                        f"desired_tip_mm={desired_tip.tolist()}, "
+                        f"actual_tip_mm={actual_tip_mm.tolist()}, "
+                        f"tip_error_mm={error_mm:.3f}"
+                    )
+            if needle_self_collision_pair is not None:
+                self_result = sim.checkCollision(
+                    needle_self_collision_pair[0], needle_self_collision_pair[1]
+                )
+                self_collision = (
+                    bool(self_result[0])
+                    if isinstance(self_result, (list, tuple))
+                    else bool(self_result)
+                )
+                needle_self_collision_frames.append(frame if self_collision else None)
+                if self_collision:
+                    raise RuntimeError(
+                        f"Needle intersects a non-wrist UR5 link during {phase} at frame {frame}"
+                    )
             if frame_delay_s > 0:
                 time.sleep(frame_delay_s)
     finally:
@@ -366,10 +531,18 @@ def run_remote_simulation(
             sim.stopSimulation()
 
     result["collision_free"] = not any(frame is not None for frame in collision_frames)
+    result["needle_self_collision_free"] = (
+        not any(frame is not None for frame in needle_self_collision_frames)
+        if needle_self_collision_pair is not None
+        else None
+    )
     result["max_tip_position_error_mm"] = max(errors_mm) if errors_mm else None
     result["final_tip_position_error_mm"] = errors_mm[-1] if errors_mm else None
     result["ik_statuses"] = [str(status) for status in ik_statuses]
     result["collision_frames"] = [frame for frame in collision_frames if frame is not None]
+    result["needle_self_collision_frames"] = [
+        frame for frame in needle_self_collision_frames if frame is not None
+    ]
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)

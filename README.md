@@ -1,103 +1,91 @@
-# 🫁 肺结节 3D 影像标准化预处理与多维特征构建系统 (LIDC-IDRI / LUNA16)
+# BN5211 肺结节影像分析与机器人穿刺仿真
 
----
-
-## 1. 项目背景与核心学术贡献 (Project Highlights)
-
-本项目致力于解决肺癌早期筛查中人工阅片耗时长、微小病灶易漏诊的临床痛点。基于 **LIDC-IDRI** 与 **LUNA16** 双数据集，构建了从原始异构医学影像（DICOM/MHD）清洗、特征提取、深度学习建模到临床辅助决策的端到端全栈流水线。
-
-- **多流派网络架构矩阵**：完整复现并横向对比了 2D (ResNet, DenseNet) 与 3D (ResNet, VNet) 医学图像分类基线，深度论证了空间立体特征在结节鉴别中的不可替代性。
-- **混合注意力机制与消融验证**：自主研发并注入 2D/3D Attention 模块（如 3D CBAM），并通过严谨的消融实验（Ablation Study）证实了其在微小病灶特征捕捉上的显著增益。
-- **打破黑盒与多维临床压测**：集成 3D Grad-CAM 逆向投影技术，精准定位良性“中心钙化”与恶性“边缘浸润”特征；并执行了极其严苛的临床亚组分析（Clinical Subgroups）与零样本泛化测试（LUNA16 Generalization）。
-- **循证医学应用落地**：基于 Youden Index 计算出最佳临床防漏诊阈值，融合模型集成策略（Ensemble），最终交付高可用性的 Streamlit 靶向药辅助决策 Web 平台。
-- **机器人穿刺辅助原型**：从 CT 物理坐标生成肋骨 AABB 避障约束，规划直线路径，并通过 CoppeliaSim 的 UR5 + simIK + Python ZeroMQ Remote API 执行可检查的仿真轨迹。旧的 Matplotlib 图/GIF 只用于概念展示，不代表关节级机器人仿真。
-
----
-
-## 2. 核心技术栈 (Tech Stack)
-
--   **核心驱动语言**: `Python 3.9+`
--   **医疗影像解析底座**:
-    *   `SimpleITK`: 支撑三维空间插值、形态学滤波网络及全维度矩阵仿射变换。
-    *   `pydicom`: 极速剥离 DICOM 头部信息并提取脱敏临床元数据。
--   **科学计算与特征工程聚合**:
-    *   `pandas`: 构建临床宏观账本、执行高维数据聚合与阵营级联筛选。
-    *   `numpy`: 驱动三维空间距离运算、HU 标量截断及安全掩膜填充。
--   **深度学习框架**: `PyTorch`, `PyTorch Lightning`
--   **机器人运动学与空间几何**: 基于标准 DH 参数构建的 6-DOF 运动学求解器、Ray-AABB 射线碰撞检测（Slab Method）
--   **多维可视化与动态交互**: `Matplotlib 3D`, `Streamlit`, `Pillow (GIF 动图渲染)`
-
----
-
-## 3. 项目标准目录结构 (Project Directory Structure)
-本仓库的代码架构严格遵循高内聚、低耦合的机器学习工程规范：
+本项目覆盖肺结节 CT 数据处理、恶性风险二分类模型、模型评估与可视化、交互式推理，以及后续的 UR5 穿刺路径规划和 CoppeliaSim 仿真。整体链路如下：
 
 ```text
-Lung-Nodule/
-├── data/
-│   ├── processed/                       # 数据资产核心库
-│   │   ├── all_roi_cubes/               # LIDC 32x32x32 标准化结节张量
-│   │   ├── luna16_roi_cubes/            # LUNA16 跨域泛化测试张量
-│   │   ├── preprocessed_cubes/          # LUNA16 全肺闭运算预处理矩阵
-│   │   ├── cleaned_nodules_labels.csv   # 黄金结节清洗清单 (Ground Truth)
-│   │   ├── final_split_train_manifest.csv # 7:1:2 患者级防泄露切分索引
-│   │   └── *manifest.csv                # 各阶段资产总账本
-│   └── demo_nodules/                    # 手术环境描述、规划轨迹与三维仿真导出物
-│
-├── models/                              # 模型权重与评估产物
-│   ├── checkpoints_*/                   # 细分模型权重库 (2d, 3d, vnet, attention, densenet, ablation)
-│   ├── evaluation_results/              # 各类 ROC 曲线、混淆矩阵、统计分析图表
-│   └── logs/                            # TensorBoard 训练日志
-│
-├── src/                                 # 核心闭环源码
-│   ├── 预处理与数据管道 (Data Pipeline)
-│   │   ├── preprocess.py / explore_data.py / extract_roi.py
-│   │   ├── extract_luna16.py            # LUNA16 盲测集独立提取器
-│   │   ├── split_dataset.py             # 患者级防穿越数据切分
-│   │   └── dataset_2D.py / dataset_3D.py # PyTorch Dataset 加载器
-│   │
-│   ├── 核心网络架构 (Network Architectures)
-│   │   └── model_*.py                   # 涵盖 2D, 3D, DenseNet, VNet 等骨干网络定义
-│   │
-│   ├── 训练引擎 (Training Modules)
-│   │   └── train_*.py                   # 针对不同架构的独立训练脚本 (含 Attention 与 Ablation)
-│   │
-│   ├── 评估与可解释性 (Evaluation & Interpretability)
-│   │   ├── evaluate_*.py                # 多维评估 (2D/3D对比, Subgroups, 泛化测试, Ensemble, 临床阈值)
-│   │   └── generate_3D_gradcam.py       # 3D 梯度类激活热力图反演
-│   │
-│   ├── 手术环境建模与轨迹规划 (Environment & Trajectory Planning)
-│   │   ├── environment_modeling.py      # CT 骨骼与胸壁包围盒 (AABB) 提取
-│   │   └── trajectory_planner.py        # 基于射线-AABB 碰撞检测的最优路径规划
-│   │
-│   ├── 机器人运动控制与多模态仿真 (Robotics & Simulation)
-│   │   ├── robot_kinematics.py          # UR5 机械臂 DH 建模与逆运动学数值求解
-│   │   ├── robot_geometry.py             # CT/机器人坐标变换、单位和姿态工具
-│   │   ├── main_pipeline.py             # 端到端 AI+机器人穿刺总控主流程
-│   │   ├── coppeliasim_remote.py        # CoppeliaSim ZeroMQ + simIK 执行器
-│   │   ├── visualize_simulation.py      # 3D 静态手术场景仿真与高清图导出
-│   │   └── simulate_dynamic_puncture.py # 动态进针穿刺模拟与演示 GIF 导出
-│   │
-│   └── 部署与交互 (Deployment)
-│       ├── inference_api.py             # 工业级推理张量解析接口
-│       └── app.py                       # 👨‍⚕️ Streamlit 临床决策 Web 原型
-│
-└── requirements.txt                     # 环境依赖清单
+LIDC-IDRI / LUNA16 数据
+  -> XML/CSV 标注整理
+  -> CT 预处理与结节 ROI 构建
+  -> 患者数据集清单与训练/验证划分
+  -> 2D/3D 模型训练和比较
+  -> 独立数据评估、亚组/集成/阈值分析、Grad-CAM
+  -> Streamlit ROI 推理演示
+  -> [机器人扩展] CT 几何 -> 避障规划 -> UR5 IK -> CoppeliaSim 仿真
 ```
 
----
+模型输出和机器人流程均为课程科研原型，不是临床诊断或治疗系统，不可用于真实患者诊疗或控制真实手术机器人。Streamlit 页面目前包含固定的风险区间和建议文案；这些内容不是临床验证结果，也不是治疗建议。
 
-## 4. 全链路运行指南 (Execution Guide)
+## 1. 项目模块
 
-> **推荐入口**：机器人部分已经封装为病例配置驱动脚本。新病例优先阅读
-> [`PIPELINE_GUIDE.md`](PIPELINE_GUIDE.md)，并使用
-> `python src/run_case_pipeline.py --config configs/cases_0036_0037_0039.json --case-id <CASE_ID>`。
-> 下文保留底层命令，便于调试单个阶段。
-为确保整个数据流动管道平滑闭环且表头无污染，请严格按照以下一键通关顺序执行：
+### 1.1 数据与模型主链
 
-**阶段一**：数据清洗与物理空间重构
-请依次执行以下脚本，完成异构数据的提纯、聚类与 3D ROI 提取：
+- **LIDC-IDRI**：DICOM CT、XML 放射科医生标注；整理医生评分并提取局部 3D 结节 ROI。
+- **LUNA16**：MHD CT 和 `annotations.csv`；用于全肺预处理、ROI 提取及跨数据集评估。
+- **模型**：2D ResNet/DenseNet/CBAM，3D ResNet/CBAM/VNet，以及无增强消融实验。
+- **分析**：分类指标、LUNA16 评估、临床亚组分析、模型集成、ROC/Youden 工作点和 Grad-CAM 可视化。
+- **交互演示**：Streamlit 页面接受预先标准化的 `.npy` ROI，显示概率和风险分层。
+
+### 1.2 机器人扩展
+
+机器人链路复用训练好的 3D CBAM checkpoint：由已登记病例的 ROI、CT 和 target 生成局部骨候选 AABB，规划直线路径，计算 UR5 分析 IK，并由 CoppeliaSim UR5、simIK 和 ZeroMQ Remote API 执行运动学仿真。它是主项目后续的机器人演示扩展，不替代前面的数据和模型链路。当前病例配置启用了 `force_robot_demo`，因此低于恶性概率阈值时也会继续做软件集成规划；模型分数不会自动选择结节，也不是机器人规划的安全门控。
+
+## 2. 环境和本地数据
+
+推荐 Python 3.9。安装依赖：
+
+```bash
+conda create -n bn5211 python=3.9 -y
+conda activate bn5211
+python -m pip install -r requirements.txt
+```
+
+配置文件 [config/config.yaml](config/config.yaml) 中的数据根目录默认为：
+
+```yaml
+data:
+  raw_lidc_dir: "./data/LIDC-IDRI"
+  raw_luna_dir: "./data/LUNA16"
+  processed_dir: "./data/processed"
+```
+
+将路径改成你本机的数据位置，或将数据放到上述目录结构。原始医学影像、训练 checkpoint、处理后的完整数据通常不纳入 Git；每位运行者都需要准备相应本地资产。
+
+基础依赖检查：
+
+```bash
+python -c "import torch, SimpleITK, pydicom, numpy, pandas; print(torch.__version__)"
+```
+
+## 3. 目录和主要产物
+
 ```text
+config/config.yaml                 # 原始数据与处理数据根目录
+configs/cases.json                 # 通用病例登记表（当前含示例病例）
+src/preprocess.py                  # LUNA16 MHD 全肺重采样/掩膜/归一化
+src/explore_data.py                # LIDC XML 标注整理与标签清单
+src/extract_roi.py                 # LIDC 3D ROI 提取
+src/extract_luna16.py              # LUNA16 结节 ROI 与 manifest
+src/split_dataset.py               # 患者级 split manifest 生成
+src/train_*.py                     # 2D/3D 模型训练
+src/evaluate_*.py                  # 评估、解释性及应用分析
+src/run_case_pipeline.py           # 单病例机器人流程编排
+data/processed/                    # 本地生成的 ROI、CSV manifest 和预处理影像
+models/                             # 本地 checkpoint、日志及分析图
+data/demo_nodules/                  # 机器人流程 JSON、预览图和运行记录
+scenes/                             # CoppeliaSim 场景文件
+```
+
+原始影像、预处理矩阵、checkpoint 和 `data/` 下的运行结果不随仓库分发。仓库包含基础/历史 CoppeliaSim 示例场景；每个新病例的场景和运行结果仍需在本机生成。`configs/cases.json` 当前含本机路径，换电脑运行前需按后文更新。
+
+## 4. 全链路运行指南（数据到模型）
+
+以下命令都从仓库根目录运行。先确认 `config/config.yaml` 的路径正确，并准备 LIDC-IDRI、LUNA16 对应输入资产。
+
+### 从原始数据开始：推荐执行顺序
+
+如果要从头准备本项目的 LIDC-IDRI 和 LUNA16 数据产物，按以下顺序运行。该顺序把两套数据的准备步骤放在同一条主线中：
+
+```bash
 python src/preprocess.py
 python src/explore_data.py
 python src/extract_roi.py
@@ -105,214 +93,316 @@ python src/extract_luna16.py
 python src/split_dataset.py
 ```
 
-**阶段二**：算法矩阵训练与消融实验
-项目支持多维度网络架构的训练对比，可根据研究目的运行对应脚本：
-* 基线模型训练对比
-```text
-python src/train_2D.py
-python src/train_3D.py
-python src/train_3D_vnet.py
+运行前需要准备：
+
+- LIDC-IDRI 原始 DICOM 和 XML，目录位置与 `config/config.yaml` 的 `raw_lidc_dir` 一致。
+- LUNA16 原始 `.mhd`/配套影像文件，以及 `annotations.csv`。目前 `preprocess.py` 会读取配置中的 `raw_luna_dir` 和 `processed_dir`；但 `extract_luna16.py` 将输入/输出路径写为相对路径 `data/LUNA16/` 和 `data/processed/`，因此应从仓库根目录运行，并将 LUNA16 数据放在对应目录，或先按本机目录修改该脚本路径。
+- 足够的磁盘空间。`preprocess.py` 会为每个 LUNA16 全肺体数据写出预处理 `.npy`，并非只生成结节小 ROI。
+
+这五步的输入、输出与数据集注意事项见下方各阶段说明。若只处理单个数据集，可以跳过另一数据集专属步骤；但 `split_dataset.py` 依赖 LIDC 的 `final_dataset_manifest.csv`，因此仅准备 LUNA16 时不能直接执行它来生成本项目的训练划分。
+
+### 步骤 1：LUNA16 全肺预处理
+
+确认 `config/config.yaml` 中的 `raw_luna_dir` 指向含 `.mhd` 和配套影像文件的 LUNA16 目录，然后运行：
+
+```bash
+python src/preprocess.py
 ```
 
-* 注意力机制与消融实验
+脚本对每个全肺体数据进行 1 mm 各向同性重采样、阈值/形态学掩膜处理和 HU 归一化，输出：
+
 ```text
+data/processed/preprocessed_cubes/*_preprocessed.npy
+```
+
+处理全量数据需要较多时间和磁盘空间；脚本支持通过已存在的输出文件跳过病例。
+
+### 步骤 2：LIDC 标注整理
+
+```bash
+python src/explore_data.py
+```
+
+预期生成：
+
+```text
+data/processed/master_data_exploration.csv
+data/processed/cleaned_nodules_labels.csv
+```
+
+该脚本读取 LIDC XML，汇总结节空间坐标和评分，再按医生数、直径和平均恶性评分筛选标签。它是项目的数据整理脚本，不应把输出称为临床金标准。代码当前使用简化坐标聚类/直径近似，使用其结果前需抽样核对。
+
+### 步骤 3：生成 LIDC 结节 ROI 和数据清单
+
+```bash
+python src/extract_roi.py
+```
+
+预期生成：
+
+```text
+data/processed/all_roi_cubes/*.npy
+data/processed/final_dataset_manifest.csv
+```
+
+每个 `.npy` 是单通道输入的 `32 x 32 x 32` CT patch，按脚本中的窗口裁剪和归一化约定生成。运行前后都要检查 ROI/标签/原始 DICOM 的对应关系。**当前 LIDC ROI 脚本会在患者目录下遍历并使用找到的第一套可读 DICOM 序列**；一个患者有多个序列时不能默认认为它就是 XML 标注所对应的序列。对需要严格病例追踪的数据，应先确认序列与 ROI 关联。
+
+### 步骤 4：生成 LUNA16 结节 ROI
+
+确认 `data/LUNA16` 下存在原始 `.mhd` 数据、配套影像文件及官方 `annotations.csv`，并已完成步骤 1，然后运行：
+
+```bash
+python src/extract_luna16.py
+```
+
+脚本生成：
+
+```text
+data/processed/luna16_roi_cubes/*.npy
+data/processed/luna16_dataset_manifest.csv
+```
+
+提取脚本根据 `annotations.csv` 里的物理坐标裁切 ROI。LUNA16 的标注/标签口径与 LIDC 不同，不能不加说明地将两个数据集的标签解释为同一临床结局。
+
+### 步骤 5：生成数据划分清单
+
+```bash
+python src/split_dataset.py
+```
+
+生成 `data/processed/final_split_train_manifest.csv`。该脚本按患者和风险分层生成 split 清单。不过当前多数 `train_*.py` 和 `evaluate_*.py` 脚本自行用 `random_split` 划分数据，并不读取这个 split manifest。因此，**目前不能仅凭运行 `split_dataset.py` 就声称所有训练/评估都采用了患者级独立划分**；正式报告模型性能前应核实并统一训练、验证和测试索引，避免患者/结节泄漏。
+
+### 阶段五：训练模型（可选）
+
+如果只需复用已提供的 CBAM 权重进行推理或机器人演示，可跳过本阶段。若重新训练，先完成前述 ROI 和 manifest 生成，再按实验目标执行模型脚本。
+
+```bash
+# 2D 基线与 DenseNet
+python src/train_2D.py
+python src/train_2D_densenet.py
+python src/train_2D_attention.py
+
+# 3D 基线、CBAM、VNet 与消融
+python src/train_3D.py
 python src/train_3D_attention.py
+python src/train_3D_vnet.py
 python src/train_3D_ablation.py
 ```
 
-**阶段三**：多维临床压测与可解释性反演
-模型训练完成后，执行全面的科学评估与视觉映射：
-* 基础性能与盲测泛化评估
-```text
-python src/evaluate_3D_models.py
-python src/evaluate_luna16_generalization.py
-```
+训练脚本使用 PyTorch Lightning，按 `val_acc` 保存最佳 checkpoint 到各自的 `models/checkpoints*` 子目录，并写 TensorBoard 日志到 `models/logs/`。脚本超参数、训练集划分和保存目录以代码为准；运行前建议核对数据切分和随机种子设置。机器人当前使用的模型架构是 `src/train_3D_attention.py` 中的 3D CBAM，不能拿普通 3D ResNet 或 2D checkpoint 替代。
 
-* 临床亚组分析与模型融合
-```text
+### 阶段六：模型评估和分析（可选）
+
+```bash
+# 2D / 3D 模型对比
+python src/evaluate_2D_models.py
+python src/evaluate_3D_models.py
+
+# LUNA16 跨数据集评估（要求已准备 LUNA16 manifest、ROI 和相应 checkpoint）
+python src/evaluate_luna16_generalization.py
+
+# 亚组、集成和阈值分析
 python src/evaluate_clinical_subgroups.py
 python src/evaluate_ensemble.py
-```
+python src/evaluate_clinical_value.py
 
-* 打破黑盒：生成 3D 浸润热力图
-```text
+# 3D CBAM Grad-CAM
 python src/generate_3D_gradcam.py
 ```
 
-**阶段四**：寻找最佳临床工作点与 Web 部署
-计算最优敏感/特异性平衡点，并启动交互式诊疗系统：
-* 锁定 Youden Index 最佳阈值
-```text
-python src/evaluate_clinical_value.py
-```
+评估图表主要写入 `models/evaluation_results/`。这些脚本是课程项目中的实验分析工具；其输出受数据划分、标签定义、样本数量和实现方式影响，不代表外部临床验证或临床阈值。
 
-* 启动 Web 前端交互系统
-```text
+### 阶段七：Streamlit 推理演示（可选）
+
+`src/app.py` 接收已经按项目预处理约定生成的 `.npy` ROI，而不是原始 DICOM。页面默认从 `models/checkpoints_attention/` 加载 3D CBAM 权重。安装 `requirements.txt` 中的依赖并将兼容架构的 checkpoint 放入该目录后运行：
+
+```bash
 streamlit run src/app.py
 ```
 
-**阶段五**：机器人规划与 CoppeliaSim 验证
-下面的顺序是机器人部分的实际依赖链。不要把旧 GIF 当作 CoppeliaSim 验证结果：
-* 提取解剖避障约束
-```text
-PYTHONPATH="/PATH/TO/pydicom/site-packages" python src/environment_modeling.py \
-  --ct-path "/ABS/PATH/TO/EXACT/SERIES/FOLDER" \
-  --series-instance-uid "SERIES_INSTANCE_UID_FROM_DICOM" \
-  --case-id "LIDC-IDRI-0037" \
-  --target-voxel 407 289 79 \
-  --bone-hu-threshold 500 \
-  --min-volume-voxels 15 \
-  --segment-slices 1 \
-  --output data/demo_nodules/rib_obstacles_0037_segmented.json \
-  --preview-output data/demo_nodules/rib_obstacles_0037_segmented_preview.png
+上传 ROI 后可查看模型概率和页面中定义的演示风险分层。当前风险边界及处置建议文案是固定在页面代码中的展示逻辑，未经临床验证；它不负责从 CT 自动检测、定位或裁切结节，不应据此作任何诊疗决定。
+
+## 5. 机器人穿刺仿真扩展
+
+机器人部分接收一个已经确认的 ROI/target/CT 组合。LIDC XML 中有多个阅片者和多个结节，脚本不会只凭患者 ID 猜测仿真目标；需要先选定一个 XML 标注及其阅片者/结节 ID。
+
+### 5.1 病例输入和登记
+
+每个病例登记在通用文件 `configs/cases.json` 的 `cases` 数组中。文件名表示病例登记表，不限定其中病例数量或编号：
+
+```json
+{
+  "case_id": "LIDC-IDRI-00XX",
+  "roi_path": "/absolute/path/to/case_roi.npy",
+  "ct_series_path": "/absolute/path/to/one/exact/DICOM/series",
+  "series_instance_uid": "UID_READ_FROM_THAT_SERIES",
+  "target_voxel": [X, Y, Z]
+}
 ```
 
-`--target-voxel` is `[x, y, z]` in the selected CT series, not a physical
-millimetre coordinate. It must be the same ROI centre used to create the
-checkpoint input. The extractor refuses to run when `--series-instance-uid`
-does not match the DICOM headers. The generated JSON is a conservative,
-segmented obstacle approximation for simulation; inspect the preview PNG before
-using it for trajectory planning. It is not a clinical rib segmentation.
+字段来源和当前可自动化程度：
 
-For a new case, do not reuse the 0037 lateral-window values blindly. Recompute
-the target voxel and use a symmetric local window when the lesion side or CT
-orientation differs, for example `--x-min-offset-mm -140
---x-max-offset-mm 140`. The planning code can consume the resulting JSON without
-case-specific changes.
+| 字段 | 如何取得 | 当前能否可靠自动生成 |
+| --- | --- | --- |
+| `case_id` | LIDC 病例目录名，例如 `LIDC-IDRI-0035` | 可以；从输入数据目录名取得 |
+| `roi_path` | 从 `data/processed/final_dataset_manifest.csv` 的 `cube_file_path` 找到对应 `.npy`，或填写已准备好的 checkpoint 输入 ROI | 可以列出候选 ROI；需核验它确实是要仿真的结节 |
+| `ct_series_path` | 指向该病例中唯一、已确认的 DICOM Series 文件夹 | 可离线扫描并列出候选序列；不能仅凭患者 ID 自动选对 |
+| `series_instance_uid` | 读取所选序列 DICOM header 的 `SeriesInstanceUID` | 选定序列后可自动读取，并由 pipeline 校验 |
+| `target_voxel` | 对应 ROI 中心在所选 CT 序列的 `[x, y, z]` 体素索引；数组内部顺序为 `[z, y, x]` | 当前不能从已有 manifest 可靠恢复，必须核对 ROI 与 CT 的对应关系 |
 
-The planner's `multi_direction` mode samples radial entry directions and
-distances in the CT physical frame, checks every segment against the obstacle
-AABBs, rejects targets that fall inside an obstacle, and then performs
-analytical UR5 IK. This makes the software reusable across cases, but the data
-preparation is still case-specific: every new case needs its own exact
-SeriesInstanceUID, ROI target voxel/physical coordinate, obstacle JSON, QC
-preview, and patient-to-robot transform. The `.npy` ROI cube alone does not
-contain enough metadata to recover the DICOM target coordinate.
+可以在离线环境中用新增工具从选定的 LIDC XML 标注生成 32³ ROI 和登记元数据。先列出 XML 中的结节、阅片者和评分：
 
-* 运行 AI 推理、避障规划和分析 IK，并写出 CoppeliaSim 输入契约
-```text
-python src/main_pipeline.py --checkpoint "/Users/vivi/Documents/BN5211/Final Project/训练好的/3d_resnet_cbam-epoch=29-val_acc=0.84.ckpt" --roi "/Users/vivi/Documents/BN5211/Final Project/训练好的/LIDC-IDRI-0037_IL057_12.npy" --target-mm 118.275 20.625 -163.50 --obstacles data/demo_nodules/rib_obstacles_0037_segmented.json --planning-mode multi_direction --entry-distances-mm 60 80 100 --angular-step-deg 15 --output-plan data/demo_nodules/planned_trajectory_0037.json --confirm-coincident-demo-frame --confirm-target-roi-match --force-robot-demo
+```bash
+python src/register_lidc_case.py \
+  --annotation-xml /path/to/one/LIDC-annotation.xml \
+  --list-annotations
 ```
 
-* 启动 CoppeliaSim 场景并由 simIK 驱动 UR5。场景对象名称、关节顺序和碰撞集合必须先按第 6 节创建。
-```text
-PYTHONPATH="/PATH/TO/coppeliaSim.app/Contents/Resources/programming/zmqRemoteApi/clients/python/src" python src/coppeliasim_remote.py --plan data/demo_nodules/planned_trajectory_0037.json --scene scenes/robotic_lung_biopsy.ttt --load-scene --robot /UR5 --ik-tip /UR5/ikTip --ik-target /UR5/ikTarget --robot-collision-collection /robotCollision --environment-collision-collection /patientCollision --kinematic-only --output data/demo_nodules/coppeliasim_run_0037.json
+然后明确指定同一病例的精确 DICOM series、`noduleID`，以及 XML 中该 ID 若重复时对应的 `servicingRadiologistID`：
+
+```bash
+python src/register_lidc_case.py \
+  --case-id LIDC-IDRI-00XX \
+  --ct-series /path/to/exact/DICOM-series \
+  --annotation-xml /path/to/one/LIDC-annotation.xml \
+  --nodule-id "Nodule 001" \
+  --reader-id "READER_ID" \
+  --output-dir data/registered_rois \
+  --cases-config configs/cases.json
 ```
 
-For the current 037 segmented case, use
-`scenes/robotic_lung_biopsy_0037_segmented.ttt` and
-`data/demo_nodules/rib_obstacles_0037_segmented.json`. The kinematic-only
-executor starts the stock UR5 from `[0, -pi/2, 0, -pi/2, 0, 0]` radians, then
-commands the pre-approach point before the approach-to-entry and insertion
-segments. Override the six start angles with six repeated
-`--initial-joint-angle-rad` options when a different scene requires it.
+脚本通过 XML 的 `SeriesInstanceUid`、每张轮廓的 `imageSOP_UID` 和 DICOM header 交叉校验序列/切片，再按 DICOM 方向、像素间距和层位置把轮廓中心映射到 `[x,y,z]` 体素。输出包括 checkpoint 使用的 `32 x 32 x 32` HU 窗口归一化 ROI、包含来源和坐标的 registration JSON、三视图 QC PNG，以及可选追加到 `cases.json` 的病例条目。已有输出不会静默覆盖；确需覆盖 ROI 文件时使用 `--overwrite`，替换配置内已存在病例时使用 `--replace-case`。
 
-On macOS, start CoppeliaSim directly so the ZeroMQ server is available:
+登记脚本自动化的是“一个明确选中的阅片者标注 → 对应 DICOM → ROI/target/config 记录”，不是从患者号自动选出临床共识结节。LIDC 的不同阅片者结节 ID 不能仅凭相同编号视作同一结节；生成后仍须查看 QC 图确认 ROI 落在预期病灶。原始 DICOM/XML 及 checkpoint 需已在本机下载，脚本不请求在线服务。旧 `extract_roi.py` 仍用于课程训练数据集切片，其“患者目录下第一套可读序列”逻辑不应被用于严格的病例登记。
 
-```text
-/PATH/TO/coppeliaSim.app/Contents/MacOS/coppeliaSim -GzmqRemoteApi.rpcPort=23000
+`patient_to_robot_base` 是 CT 患者坐标到 UR5 base 的 4x4 变换。`configs/cases.json` 中的矩阵是仿真摆位参数，不是实测标定，不能从 CT/XML 推导。真实机器人应用需通过外部标定流程取得矩阵并登记为 `patient_to_robot_transform_path`；本项目仅用于明确标记的教学坐标系演示。checkpoint、输出目录和规划参数在共享 `defaults` 中；病例专属路径、UID、目标体素和演示变换在对应 case 条目中。配置中的绝对路径需按运行电脑修改，相对 ROI 路径按仓库根目录解析。
+
+`src/run_case_pipeline.py` 会检查 ROI 形状/数值、DICOM Series UID 和目标体素到物理坐标的转换，但这些一致性检查不能证明操作者选对了结节或 ROI。新病例应新增一条已核实的 case 记录；障碍物、计划和仿真结果会按病例 ID 单独输出，不要复制其他病例的 target 或结果。
+
+### 5.2 离线生成障碍物和轨迹
+
+```bash
+python src/run_case_pipeline.py \
+  --config configs/cases.json \
+  --case-id LIDC-IDRI-0031 \
+  --output-dir data/case_runs/LIDC-IDRI-0031
 ```
 
-Run the Python client in the same local permission context as CoppeliaSim. A
-startup warning about the optional `pythonLauncher.py` wrapper missing `zmq`
-does not affect this bundled ZeroMQ Remote API client, which uses `pyzmq` and
-`cbor` from the selected Python environment.
-
-The repository includes a reproducible integration scene at
-`scenes/robotic_lung_biopsy.ttt`. If it needs to be regenerated after changing
-the UR5 model or obstacle subset:
+这一步读取 CT、提取局部高密度骨候选 AABB、生成 QC 预览、加载 CBAM checkpoint 推理、搜索直线路径、计算 UR5 分析 IK，并生成：
 
 ```text
-PYTHONPATH="/PATH/TO/coppeliaSim.app/Contents/Resources/programming/zmqRemoteApi/clients/python/src" python src/create_coppeliasim_scene.py --output scenes/robotic_lung_biopsy.ttt --obstacles data/demo_nodules/rib_obstacles_0037.json --max-obstacles 1
+data/case_runs/LIDC-IDRI-0031/rib_obstacles_0031_segmented.json
+data/case_runs/LIDC-IDRI-0031/rib_obstacles_0031_segmented_preview.png
+data/case_runs/LIDC-IDRI-0031/planned_trajectory_0031.json
+data/case_runs/LIDC-IDRI-0031/pipeline_summary_0031.json
 ```
 
-`--kinematic-only` is required for the stock UR5 model used here: it keeps the
-scene stopped, switches the six joints to kinematic mode, and prevents the
-model's dynamic controller from overwriting simIK joint positions. The
-`robotCollision` and `patientCollision` collections are recreated at runtime
-because CoppeliaSim collections are not persisted in the `.ttt` scene.
-Add `--frame-delay 0.08` to the remote command when you want to watch the
-actual CoppeliaSim motion frame by frame in the GUI. Without this option the
-same 100 frames are executed too quickly to observe.
+0031 是仓库配置中已有完整运动学仿真通过记录的示例病例。0036 在当前配置的 30° 入路范围内，经完整针体扫掠检查后没有安全直线路径；0039 曾有离线规划结果，但不能据此认定当前版本仿真通过。当前 patient obstacles 是局部 HU 阈值生成的分段 AABB 近似，不是完整胸廓/肋骨分割，也未包含真实皮肤表面、血管、软组织和呼吸运动。
 
-* 旧的 Matplotlib 概念图（可选，不是机器人验证）
-```text
-python src/simulate_dynamic_puncture.py
+### 5.3 生成场景并执行 CoppeliaSim 仿真
+
+启动 CoppeliaSim ZeroMQ Remote API 服务（端口 `23000`）。macOS 示例：
+
+```bash
+export COPPELIASIM_ROOT="/Applications/coppeliaSim.app"
+"$COPPELIASIM_ROOT/Contents/MacOS/coppeliaSim" \
+  -GzmqRemoteApi.rpcPort=23000
 ```
 
----
+保持 CoppeliaSim 运行，在仓库另一个终端运行：
 
-## 5. 快速开始与环境配置 (Quick Start)
-
-**1**. 创建并激活纯净虚拟环境
-```text
-conda create -n lung_nodule python=3.9 -y
-conda activate lung_nodule
+```bash
+PYTHONPATH="$COPPELIASIM_ROOT/Contents/Resources/programming/zmqRemoteApi/clients/python/src:$PWD/src" \
+python src/run_case_pipeline.py \
+  --config configs/cases.json \
+  --case-id LIDC-IDRI-0031 \
+  --run-simulation \
+  --frame-delay 0.08 \
+  --output-dir data/case_runs/LIDC-IDRI-0031 \
+  --scene-output scenes/robotic_lung_biopsy_0031_latest.ttt
 ```
 
-**2**. 安装核心依赖
-```text
-pip install -r requirements.txt
+默认教学场景使用 `220 mm` 针具并将 overhead mount 抬高 `200 mm`，同时补偿 demo 坐标变换，使 CT 患者几何在世界坐标中不移动；它会改变机械臂伸展姿态，不改变针路相对患者的位置。局部障碍提取默认使用 `segment_slices=5` 和 `min_volume_voxels=40`。规划器按 4 mm 针半径加 2 mm 额外余量扩张骨候选 AABB，并检查从预接近到靶点的针体扫掠。场景生成阶段还会对 `approach -> entry -> target` 的整段笛卡尔轨迹逐帧执行 simIK，并检查 UR5/针具与患者障碍、针具与机械臂自碰撞；只有整段预检通过才保存场景。上述数值是仿真假设，不是临床器械规格。ZeroMQ 客户端路径需按本机 CoppeliaSim 安装位置调整。
+
+针长、顶部安装高度和障碍分段参数可以针对一次验证运行覆盖，不会修改配置文件。例如：
+
+```bash
+python src/run_case_pipeline.py \
+  --config configs/cases.json \
+  --case-id LIDC-IDRI-0031 \
+  --needle-length-mm 220 \
+  --mount-height-mm 200 \
+  --segment-slices 5 \
+  --min-volume-voxels 40
 ```
 
----
+`segment_slices` 表示沿 CT 的 Z 轴（轴位切片方向）把一个连通的骨候选分成多少张切片一组，再为每一组生成一个 AABB 障碍盒。它的单位是 CT 切片数，不是毫米。例如，一个候选跨越约 30 张切片时，`segment_slices=5` 通常会产生约 6 个纵向障碍盒。数值越小，障碍盒越细、数量越多，对局部形状保留更多，但也更容易保留分割噪声；数值越大，障碍盒越少，但包围盒会更粗，可能扩大到肋骨以外的空间。它只影响障碍物近似模型，不改变 ROI、目标点或针的实际插入深度。
 
-## 6. 机器人 P0 接口与人工验收
+当前默认障碍物并不是由训练好的分割 checkpoint 生成的。`src/environment_modeling.py` 直接读取与病例匹配的 DICOM CT，按 HU 阈值（默认 500）进行局部高密度骨候选提取，使用 3D 连通域、体素数过滤和按切片分段，再把每个候选转换成轴对齐包围盒 AABB。`3d_resnet_cbam-epoch=29-val_acc=0.84.ckpt` 只用于 ROI 恶性概率分类，不用于肋骨分割、目标定位或障碍物生成。当前障碍物是仿真用近似，不能称为完整肋骨重建。
 
-### 6.1 坐标和单位契约
+本机保存的 0031 和 0040 运行记录各完成了 100/100 个运动学步骤，碰撞检查可用，患者碰撞与针具自碰撞均未报告，最大针尖位置误差约 `0.455 mm`。这是指定软件场景和当前近似障碍模型下的运动学仿真记录，不是动力学验证、真实机器人验证或临床安全证明。0036 当前配置下没有可行路径；0039 没有当前版本的完整通过记录。`data/` 被 Git 忽略，因此上述运行 JSON 不随仓库分发，其他电脑需按命令重新生成并检查结果。
 
-- CT 结节、入针点、肋骨 AABB 使用 **SimpleITK physical coordinates，单位 mm**。
-- `main_pipeline.py` 输出的 `patient_to_robot_base` 是从 CT 患者坐标到 UR5 base 坐标的 4x4 刚体变换，长度仍是 mm。
-- CoppeliaSim 内部使用 m/rad；`coppeliasim_remote.py` 只在 API 边界把 mm 转为 m。
-- `/UR5/ikTip` 必须放在物理针尖处，而不是只放在法兰处；`/UR5/ikTarget` 是它的目标 dummy。
-- `--confirm-coincident-demo-frame` 只允许一个明确的教学演示：它表示场景中 CT frame 与 UR5 base frame 被人为摆成一致。真实实验必须提供实际标定变换，不能使用 identity。
-- `--confirm-target-roi-match` 是另一道独立保护：操作者必须确认 ROI 文件、target 坐标和障碍物 JSON 属于同一病例/同一坐标系。文件名相似不能替代这个确认。
-- 轨迹执行分为三段：当前针尖到体外预接近点、预接近点到皮肤入口、入口到靶点的 insertion。预接近点默认位于入口点外侧 30 mm，可用 `--approach-distance-mm` 调整。
-- 场景启动时 UR5 的初始针尖位姿必须是安全、可达且位于患者模型外；脚本会从该实际位姿开始记录 `initial_tcp_to_approach`，不会把任意初始姿态伪装成已经到达入口点。
+仅当运行记录中碰撞检查可用、`collision_free` 和 `needle_self_collision_free` 均为 true、无碰撞帧、运动阶段完整且针尖误差符合项目容差时，才记录为该软件场景仿真通过。碰撞或 IK 失败就是失败结果，不应通过随意改针长、关闭碰撞或放宽未经论证的约束来凑成功。当前针长参数是几何占位值，未按具体临床器械 IFU 选型。
 
-### 6.2 需要本地修改的路径
+### 5.4 人工验收清单
 
-`src/main_pipeline.py` 的默认 checkpoint/ROI 是当前电脑的路径：
+每次更换病例、ROI、DICOM 序列、坐标变换或仿真参数后，都应重新验收；不能只依据规划器的“安全轨迹数”或进程退出码判定通过。
 
-```text
-/Users/vivi/Documents/BN5211/Final Project/训练好的/3d_resnet_cbam-epoch=29-val_acc=0.84.ckpt
-/Users/vivi/Documents/BN5211/Final Project/训练好的/LIDC-IDRI-0037_IL057_12.npy
+1. **输入和坐标**：核对病例 ID、ROI、DICOM `SeriesInstanceUID`、ROI 三视图 QC 图和目标位置；确认 `cases.json` 中的 target voxel 与所选序列一致。病例登记的患者到 UR5 变换目前是教学摆位，不是实测标定。
+2. **障碍物预览**：打开 `rib_obstacles_<case>_segmented_preview.png`，确认目标附近的骨候选大致对应 CT 高密度结构，检查明显游离的分割噪声。局部 AABB 是简化模型，预览不能证明肋骨分割完整或临床准确。
+3. **轨迹和场景**：检查 `planned_trajectory_<case>.json` 中 approach、entry、target、方向、插入深度与目标一致；打开生成的 `.ttt`，确认顶置 UR5、安装板、针具方向、目标点和障碍物位置合理，没有初始自碰撞或针具穿过机械臂。运行时在 CoppeliaSim 中观察整段 approach、entry、insertion 是否连续且没有非计划的大幅摆动。当前脚本不自动生成 GIF 或视频。
+4. **仿真结果 JSON**：检查 `coppeliasim_run_<case>_segmented.json` 的 `executed_steps` 是否等于配置的步数、`collision_check_available` 与 `needle_self_collision_check_available` 是否为 true、`collision_free` 与 `needle_self_collision_free` 是否为 true、`collision_frames` 和 `needle_self_collision_frames` 是否为空，并检查最大/最终针尖误差。
+5. **汇总结果**：检查 `pipeline_summary_<case>.json` 指向的输入、障碍、计划、场景和仿真结果均属于同一病例及本次输出目录。任一碰撞、IK 失败、序列不匹配或输入来源不清均判为失败，先查明原因再重跑，不要将失败结果描述为成功穿刺。
+
+人工验收只用于检查软件仿真的一致性和可解释性。当前没有完整患者胸廓、软组织、器官运动、动力学或真实机器人闭环，因此画面中针尖到达规划靶点不等同于完成了临床穿刺活检。
+
+## 6. 当前边界与复现注意事项
+
+- **数据路径**：`config/config.yaml`、机器人配置和若干旧脚本含本地相对/绝对路径；换电脑时需检查并调整。
+- **病例到 ROI 的绑定**：`src/register_lidc_case.py` 已将明确选定的 LIDC XML 标注、精确 DICOM series、ROI 和 provenance 封装为可重跑流程；它不会自动替阅片者选择临床共识结节，QC 图和标注选择仍需人工确认。
+- **模型验证**：已有训练与评估脚本，但 split manifest 并未被多数训练/评估入口统一使用；指标应谨慎解释，严谨对比前需要统一患者级 split。
+- **LUNA16 标签**：LUNA16 标注提供结节中心/直径，不等同于 LIDC 放射科医生恶性评分；当前 LUNA16 提取脚本中的标签构造是项目实现选择，不应当作病理真值。
+- **机器人几何**：局部 AABB 只支持软件级碰撞近似；完整肋骨、体表、软组织、运动和真实器械几何尚未建齐。
+- **坐标标定**：病例示例的 CT-to-UR5 transform 是教学摆位，真实患者到机械臂的实测标定尚缺。
+- **针具参数**：仿真几何长度不能代表临床器械长度；需先选定器械并依据其 IFU 建模。
+- **临床范围**：所有模型概率、风险分层和机器人轨迹均为研究演示，不提供临床决策或可执行手术方案。
+
+## 7. 常见问题
+
+**找不到输入文件/manifest**：检查 `config/config.yaml` 和数据目录；按前述阶段先生成所需 CSV、ROI 和预处理文件。
+
+**模型 checkpoint 结构不匹配**：确认 2D、3D ResNet、3D CBAM、VNet checkpoint 与加载类对应；机器人 pipeline 使用 3D CBAM checkpoint。
+
+**机器人病例 ID 未登记**：向机器人 JSON 的 `cases` 数组添加经确认的 ROI、精确 DICOM 序列、Series UID 和 target voxel。
+
+**SeriesInstanceUID 不匹配或扫描到多个序列**：指定唯一准确的 DICOM series 目录并核对配置，不应绕过校验。
+
+**没有无碰撞路径/IK 失败**：检查 target、变换、预览和 UR5 构型；不要为获得成功日志而更改临床器械参数或禁用碰撞检测。
+
+**Remote API 不可用**：确认 CoppeliaSim 已启动且端口为 `23000`，并在 `PYTHONPATH` 中使用该安装自带的 Python ZeroMQ 客户端。
+
+## 8. 验证
+
+运行仓库内的单元测试：
+
+```bash
+python -m unittest discover -s tests -v
 ```
 
-换电脑时用命令行 `--checkpoint` 和 `--roi` 覆盖。还需要提供：
+端到端机器人运行还需要本机的 LIDC DICOM、ROI、checkpoint 和已启动的 CoppeliaSim ZeroMQ 服务；单元测试通过不代表病例仿真通过。
 
-- 与 ROI/target 同一病例、同一坐标系的 CT DICOM 序列；
-- 由 `environment_modeling.py` 生成的 `rib_obstacles_0037.json`；
-- CoppeliaSim `.ttt` 场景；
-- CT 患者坐标到 UR5 base 的标定矩阵，或仅用于教学的 coincident-frame 场景；
-- 场景中的 UR5 关节路径、IK tip/target dummy 和机器人/患者碰撞集合。
+## 9. 主要脚本索引
 
-### 6.3 人工验证顺序
-
-1. 创建 Python 3.9 环境并安装 `requirements.txt`。机器人推理入口直接加载已有 CBAM checkpoint，不需要导入 PyTorch Lightning；训练脚本仍需要 `pytorch-lightning`。先执行 `python -c "import torch; print(torch.__version__)"`。
-2. 确认 ROI 是 `(32, 32, 32)`，并把 CBAM checkpoint 路径指向 `3d_resnet_cbam-epoch=29-val_acc=0.84.ckpt`。不要用 `3d_resnet18` checkpoint 加载 CBAM 模型。
-3. 如果有原始 CT，先运行 `python src/environment_modeling.py`，检查输出 AABB JSON 与患者坐标单位；若没有 CT，不能伪造障碍物 JSON。
-4. 运行第 5 阶段的 `main_pipeline.py` 命令。若有真实标定矩阵，增加 `--patient-to-robot-transform /ABS/PATH/ct_to_ur5_mm.json`；只有教学场景才增加 `--confirm-coincident-demo-frame`。同时人工核对 ROI、target、障碍物 JSON 属于同一病例后增加 `--confirm-target-roi-match`。检查输出 JSON 中 `decision=robot_plan_ready`、`best_trajectory`、患者/机器人两套坐标、`approach_point_*` 以及 `analytical_ik`。如果 AI 概率低于阈值，教学演示才使用 `--force-robot-demo`。
-5. 在 CoppeliaSim 打开 `.ttt` 场景，确认 UR5 有 6 个关节，`ikTip` 位于针尖，`ikTarget` 位于同一世界坐标体系，并能看到患者/肋骨碰撞集合。当前场景默认使用 `[0, -pi/2, 0, -pi/2, 0, 0]` radians 作为安全起始姿态；执行器会先把预接近点作为第一条 IK 目标。
-6. 启用 CoppeliaSim ZeroMQ Remote API 服务（默认端口 `23000`），执行 `coppeliasim_remote.py` 命令。脚本会读取初始针尖位置，逐段调用 simIK，记录 `phase_sequence`，读取实际 tip 位姿并调用 `sim.checkCollision`。
-7. 只有当输出 `collision_free=true`、`max_tip_position_error_mm` 在项目报告设定阈值内、`collision_frames` 为空且 `phase_sequence` 包含 insertion 时，才记录仿真通过。`coppeliasim_run_0037.json` 是实际远程运行结果；规划 JSON 本身不是运行结果。
-
-### 6.4 当前明确未完成/缺失
-
-仓库现在已有软件集成用 `.ttt` 场景、UR5、针具、IK dummies、运行时碰撞集合重建逻辑和多方向直线规划器。规划器仍是仿真级几何规划：它没有自动验证真实皮肤表面，也没有呼吸运动、软组织、血管或临床器械约束。真实患者到 UR5 的实测 4x4 标定矩阵仍缺失；没有标定时只能使用明确标注的 coincident-frame 教学演示。原始 CT 序列可以不随仓库提交，但每个病例生成或复核障碍物时必须在本地提供与 ROI/target 同病例的 DICOM 序列。
-
-本仓库还提供一个不依赖 CT 规划结果的 CoppeliaSim 软件冒烟测试：
-
-```text
-PYTHONPATH="/PATH/TO/coppeliaSim.app/Contents/Resources/programming/zmqRemoteApi/clients/python/src" python src/coppeliasim_remote.py --plan data/demo_nodules/coppeliasim_smoke_plan.json --scene scenes/robotic_lung_biopsy.ttt --load-scene --robot /UR5 --ik-tip /UR5/ikTip --ik-target /UR5/ikTarget --robot-collision-collection /robotCollision --environment-collision-collection /patientCollision --steps 24 --kinematic-only --output data/demo_nodules/coppeliasim_smoke_run.json
-```
-
-通过标准：输出 JSON 中 `collision_free=true`、`collision_frames=[]`、
-`phase_sequence` 包含 `approach`、`approach_to_entry`、`insertion`，且
-`max_tip_position_error_mm` 小于项目报告设定阈值。该 smoke plan 只验证
-软件连接和 simIK，不是患者穿刺计划。
-
----
-
-## 7. 免责声明 (Disclaimer)
-本项目模型及 Web 系统输出的恶性概率与风险分层结果，仅供生物医学工程领域的学术研究、算法验证及演示使用。在任何情况下，均不可替代专业注册放射科医师与肿瘤科医师在真实医疗环境中的最终确诊意见。规划轨迹与机械臂控制仿真代码亦不可直接用于真实人体手术操作。
+| 功能 | 入口 |
+| --- | --- |
+| LUNA16 全肺预处理 | `src/preprocess.py` |
+| LIDC 标注整理 | `src/explore_data.py` |
+| LIDC ROI 和训练 manifest | `src/extract_roi.py` |
+| 单病例 XML-DICOM ROI 登记 | `src/register_lidc_case.py` |
+| LUNA16 ROI 和 manifest | `src/extract_luna16.py` |
+| 患者级 split 清单 | `src/split_dataset.py` |
+| 2D/3D 训练 | `src/train_*.py` |
+| 模型评估和可解释性 | `src/evaluate_*.py`, `src/generate_3D_gradcam.py` |
+| Streamlit 推理 | `src/app.py` |
+| 机器人病例编排 | `src/run_case_pipeline.py` |
+| CoppeliaSim 场景生成/执行 | `src/create_coppeliasim_scene.py`, `src/coppeliasim_remote.py` |

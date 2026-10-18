@@ -220,7 +220,7 @@ class VirtualChestEnvironment:
         x_max_offset_mm=140.0,
         y_half_range_mm=150.0,
         z_half_range_mm=80.0,
-        segment_slices=6,
+        segment_slices=5,
         exclude_target_roi_half_size_voxels=0,
         case_id=None,
     ):
@@ -430,8 +430,8 @@ if __name__ == "__main__":
         # Axial slice boxes are deliberately conservative but avoid the large
         # empty-space envelopes produced when curved ribs are merged across z.
         bone_hu_threshold = 500.0 if args.bone_hu_threshold is None else args.bone_hu_threshold
-        min_volume_voxels = 15 if args.min_volume_voxels is None else args.min_volume_voxels
-        segment_slices = 1 if args.segment_slices is None else args.segment_slices
+        min_volume_voxels = 40 if args.min_volume_voxels is None else args.min_volume_voxels
+        segment_slices = 5 if args.segment_slices is None else args.segment_slices
         rib_boxes = env.extract_local_rib_bounding_boxes(
             target_voxel=args.target_voxel,
             bone_hu_threshold=bone_hu_threshold,
