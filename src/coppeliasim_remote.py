@@ -22,6 +22,88 @@ from robot_geometry import (
 
 
 DEFAULT_INITIAL_JOINT_ANGLES_RAD = (0.0, -math.pi / 2.0, 0.0, -math.pi / 2.0, 0.0, 0.0)
+DEFAULT_MAX_CARTESIAN_STEP_MM = 3.0
+DEFAULT_IK_JOINT_MAX_STEP_RAD = math.radians(8.0)
+DEFAULT_JOINT_LIMIT_MARGIN_RAD = math.radians(5.0)
+
+
+def _configure_ik_group(sim_ik, env, group, sim_to_ik, joints,
+                        max_joint_step_rad=DEFAULT_IK_JOINT_MAX_STEP_RAD,
+                        joint_limit_margin_rad=DEFAULT_JOINT_LIMIT_MARGIN_RAD):
+    """Configure simIK for bounded, continuous and reproducible solves.
+
+    The API gained these flags over several CoppeliaSim releases.  Applying
+    only the flags/methods present in the installed version keeps the scene
+    compatible while still enabling limit avoidance whenever available.
+    """
+    flags = int(getattr(sim_ik, "group_enabled", 1))
+    for name in (
+        "group_avoidlimits",
+        "group_stoponlimithit",
+        "group_restoreonbadlintol",
+        "group_restoreonbadangtol",
+    ):
+        value = getattr(sim_ik, name, None)
+        if value is not None:
+            flags |= int(value)
+    set_group_flags = getattr(sim_ik, "setGroupFlags", None)
+    if set_group_flags is not None and flags:
+        try:
+            set_group_flags(env, group, flags)
+        except Exception:
+            pass
+
+    for joint in joints:
+        ik_joint = sim_to_ik.get(joint)
+        if ik_joint is None:
+            continue
+        set_max_step = getattr(sim_ik, "setJointMaxStepSize", None)
+        if set_max_step is not None:
+            try:
+                set_max_step(env, ik_joint, float(max_joint_step_rad))
+            except Exception:
+                pass
+        set_margin = getattr(sim_ik, "setJointLimitMargin", None)
+        if set_margin is not None:
+            try:
+                set_margin(env, ik_joint, float(joint_limit_margin_rad))
+            except Exception:
+                pass
+        sim_ik.setJointMode(env, ik_joint, sim_ik.jointmode_ik)
+
+
+def _read_joint_intervals(sim, joints):
+    """Read CoppeliaSim joint intervals for diagnostics and hard gating."""
+    intervals = []
+    for joint in joints:
+        item = {"cyclic": None, "min_rad": None, "max_rad": None}
+        try:
+            cyclic, interval = sim.getJointInterval(joint)
+            item["cyclic"] = bool(cyclic)
+            values = np.asarray(interval, dtype=float).reshape(-1)
+            if not item["cyclic"] and values.size >= 2:
+                item["min_rad"] = float(values[0])
+                item["max_rad"] = float(values[0] + values[1])
+        except Exception:
+            pass
+        intervals.append(item)
+    return intervals
+
+
+def _joint_limit_margin_rad(q, intervals):
+    """Return the smallest distance to a non-cyclic joint hard stop."""
+    margins = []
+    for value, interval in zip(np.asarray(q, dtype=float), intervals):
+        if interval.get("cyclic") or interval.get("min_rad") is None:
+            continue
+        margins.append(
+            min(float(value) - interval["min_rad"], interval["max_rad"] - float(value))
+        )
+    return float(min(margins)) if margins else float("inf")
+
+
+def _shortest_joint_delta(q, previous):
+    return (np.asarray(q, dtype=float) - np.asarray(previous, dtype=float) + np.pi) % (2.0 * np.pi) - np.pi
 
 
 def _load_plan(path):
@@ -194,43 +276,53 @@ def _colliding_patient_obstacles(sim, robot_collection, obstacle_handles):
     return colliding
 
 
-def _polyline_samples(points, total_steps):
-    """Sample a waypoint polyline with exactly ``total_steps`` points.
+def _polyline_samples(points, total_steps, max_segment_mm=DEFAULT_MAX_CARTESIAN_STEP_MM,
+                      max_steps=1000):
+    """Sample a waypoint polyline with a spatial step bound.
 
-    The first three waypoints are optional in practice: if two adjacent points
-    coincide, that segment receives no intervals. This keeps the execution
-    contract useful for old plans while making the phase boundaries explicit.
+    ``total_steps`` remains a lower bound for backwards compatibility.  Long
+    clinical segments are subdivided further so collision and IK checks cannot
+    silently skip a rib or a large joint-space jump between two frames.
     """
     points = [np.asarray(point, dtype=float) for point in points]
-    if any(point.shape != (3,) for point in points):
-        raise ValueError("Every waypoint must contain exactly three coordinates")
+    if any(point.shape != (3,) or not np.isfinite(point).all() for point in points):
+        raise ValueError("Every waypoint must contain exactly three finite coordinates")
     if total_steps < 2:
         raise ValueError("total_steps must be at least 2")
+    if max_segment_mm <= 0 or max_steps < 2:
+        raise ValueError("max_segment_mm must be positive and max_steps >= 2")
 
     segment_lengths = np.array(
-        [np.linalg.norm(points[index + 1] - points[index]) for index in range(len(points) - 1)],
+        [np.linalg.norm(points[index + 1] - points[index])
+         for index in range(len(points) - 1)],
         dtype=float,
     )
     active = np.flatnonzero(segment_lengths > 1e-9)
     if len(active) == 0:
         return [points[0].copy()], ["stationary"]
 
-    interval_budget = total_steps - 1
-    if interval_budget < len(active):
-        raise ValueError(
-            f"total_steps={total_steps} is too small for {len(active)} non-zero waypoint segments"
-        )
-
+    # At least this many intervals are required by the spatial resolution.
     intervals = np.zeros(len(segment_lengths), dtype=int)
-    intervals[active] = 1
-    remaining = interval_budget - len(active)
-    proportions = segment_lengths[active] / segment_lengths[active].sum()
-    extra = np.floor(remaining * proportions).astype(int)
-    intervals[active] += extra
-    remainder = remaining - int(extra.sum())
-    order = active[np.argsort(-segment_lengths[active])]
-    for index in range(remainder):
-        intervals[order[index % len(order)]] += 1
+    intervals[active] = np.maximum(
+        1, np.ceil(segment_lengths[active] / float(max_segment_mm)).astype(int)
+    )
+    requested_intervals = max(int(total_steps) - 1, int(intervals.sum()))
+    remaining = requested_intervals - int(intervals.sum())
+    if remaining:
+        proportions = segment_lengths[active] / segment_lengths[active].sum()
+        extra = np.floor(remaining * proportions).astype(int)
+        intervals[active] += extra
+        for index in range(remaining - int(extra.sum())):
+            intervals[active[np.argmax(segment_lengths[active])]] += 1
+
+    if int(intervals.sum()) + 1 > int(max_steps):
+        scale = (float(max_steps) - 1.0) / float(intervals.sum())
+        intervals[active] = np.maximum(1, np.floor(intervals[active] * scale).astype(int))
+        while int(intervals.sum()) + 1 > int(max_steps):
+            longest = active[np.argmax(segment_lengths[active] / intervals[active])]
+            if intervals[longest] <= 1:
+                break
+            intervals[longest] -= 1
 
     samples = [points[0].copy()]
     phases = ["initial"]
@@ -258,6 +350,9 @@ def run_remote_simulation(
     robot_collision_collection=None,
     environment_collision_collection=None,
     steps=100,
+    max_cartesian_step_mm=DEFAULT_MAX_CARTESIAN_STEP_MM,
+    max_joint_step_rad=DEFAULT_IK_JOINT_MAX_STEP_RAD,
+    joint_limit_margin_rad=DEFAULT_JOINT_LIMIT_MARGIN_RAD,
     allow_no_collision_check=False,
     kinematic_only=False,
     initial_joint_angles_rad=None,
@@ -308,22 +403,51 @@ def run_remote_simulation(
 
     collision_pair = None
     needle_self_collision_pair = None
+    mount_collision_pair = None
+
     if robot_collision_collection and environment_collision_collection:
         collision_pair = (
-            _ensure_collection(sim, robot_collision_collection, root_handle=base_handle),
+            _ensure_collection(
+                sim,
+                robot_collision_collection,
+                root_handle=base_handle,
+            ),
             _ensure_collection(
                 sim,
                 environment_collision_collection,
                 object_handles=_patient_obstacle_handles(sim),
             ),
         )
+
         needle_self_collision_pair = _ensure_self_collision_collections(
             sim, base_handle, joints
         )
+
+        # Mounting plate collision check
+        try:
+            mount_arm_collection = sim.getCollectionHandle(
+                "mountArmCollision"
+            )
+            mount_collection = sim.getCollectionHandle(
+                "mountCollision"
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Mount collision collections are missing. "
+                "Regenerate the scene using the updated "
+                "create_coppeliasim_scene.py."
+            ) from exc
+
+        mount_collision_pair = (
+            mount_arm_collection,
+            mount_collection,
+        )
+
     elif not allow_no_collision_check:
         raise RuntimeError(
-            "Collision collections are required. Pass --robot-collision-collection and "
-            "--environment-collision-collection, or explicitly use --allow-no-collision-check."
+            "Collision collections are required. "
+            "Pass --robot-collision-collection and "
+            "--environment-collision-collection."
         )
 
     if kinematic_only:
@@ -350,10 +474,12 @@ def run_remote_simulation(
         target_handle,
         sim_ik.constraint_pose,
     )
-    for joint in joints:
-        ik_joint = sim_to_ik.get(joint)
-        if ik_joint is not None:
-            sim_ik.setJointMode(ik_env, ik_joint, sim_ik.jointmode_ik)
+    _configure_ik_group(
+        sim_ik, ik_env, ik_group, sim_to_ik, joints,
+        max_joint_step_rad=max_joint_step_rad,
+        joint_limit_margin_rad=joint_limit_margin_rad,
+    )
+    joint_intervals = _read_joint_intervals(sim, joints)
 
     entry = np.asarray(plan["entry_point_robot_base_mm"], dtype=float)
     target = np.asarray(plan["target_point_robot_base_mm"], dtype=float)
@@ -380,20 +506,39 @@ def run_remote_simulation(
     errors_mm = []
     collision_frames = []
     needle_self_collision_frames = []
+    mount_collision_frames = []
     ik_statuses = []
+    joint_history = []
+    joint_steps = []
+    limit_margins = []
     result = {
         "plan_path": os.path.abspath(plan_path),
         "scene_path": os.path.abspath(scene_path) if scene_path else None,
         "coordinate_system": "UR5 base frame; input mm converted to metres at API boundary",
         "steps": steps,
         "executed_steps": None,
+
         "collision_check_available": collision_pair is not None,
         "needle_self_collision_check_available": needle_self_collision_pair is not None,
+        "mount_collision_check_available": mount_collision_pair is not None,
+
         "collision_free": None,
         "needle_self_collision_free": None,
+        "mount_collision_free": None,
+
         "kinematic_only": bool(kinematic_only),
         "max_tip_position_error_mm": None,
         "final_tip_position_error_mm": None,
+        "max_joint_step_rad": None,
+        "total_joint_motion_rad": None,
+        "min_joint_limit_margin_rad": None,
+        "joint_limit_margin_threshold_rad": float(joint_limit_margin_rad),
+        "joint_intervals": joint_intervals,
+        "joint_angle_history_rad": [],
+        "trajectory_sampling": {
+            "requested_steps": int(steps),
+            "max_cartesian_step_mm": float(max_cartesian_step_mm),
+        },
     }
 
     sim.setStepping(not kinematic_only)
@@ -414,6 +559,7 @@ def run_remote_simulation(
             waypoints, phases = _polyline_samples(
                 [approach, entry, target],
                 total_steps=steps,
+                max_segment_mm=max_cartesian_step_mm,
             )
             # _polyline_samples labels its first point as the measured
             # initial state. Here the first point is an actual IK command.
@@ -427,6 +573,7 @@ def run_remote_simulation(
             waypoints, phases = _polyline_samples(
                 [initial_tip, approach, entry, target],
                 total_steps=steps,
+                max_segment_mm=max_cartesian_step_mm,
             )
         result["initial_tip_robot_base_mm"] = initial_tip.tolist()
         result["approach_point_robot_base_mm"] = approach.tolist()
@@ -462,6 +609,7 @@ def run_remote_simulation(
                 f"orientation_error_deg={initial_orientation_error_deg:.3f}"
             )
 
+        previous_q = np.asarray([sim.getJointPosition(joint) for joint in joints], dtype=float)
         for frame, (desired_tip, phase) in enumerate(zip(waypoints, phases)):
             if frame == 0 and kinematic_only:
                 # Scene generation already solved this exact pre-approach pose.
@@ -487,6 +635,14 @@ def run_remote_simulation(
             actual_tip_mm = np.asarray(actual_pose[:3], dtype=float) * 1000.0
             error_mm = float(np.linalg.norm(actual_tip_mm - desired_tip))
             errors_mm.append(error_mm)
+            current_q = np.asarray([sim.getJointPosition(joint) for joint in joints], dtype=float)
+            delta_q = _shortest_joint_delta(current_q, previous_q)
+            joint_history.append(current_q.tolist())
+            if frame:
+                joint_steps.append(float(np.max(np.abs(delta_q))))
+            limit_margins.append(_joint_limit_margin_rad(current_q, joint_intervals))
+            previous_q = current_q
+            result["joint_angle_history_rad"] = joint_history
 
             if collision_pair is not None:
                 collision_result = sim.checkCollision(collision_pair[0], collision_pair[1])
@@ -524,6 +680,32 @@ def run_remote_simulation(
                     raise RuntimeError(
                         f"Needle intersects a non-wrist UR5 link during {phase} at frame {frame}"
                     )
+            # Check moving UR5 links and needle against mounting plate.
+            if mount_collision_pair is not None:
+                mount_result = sim.checkCollision(
+                    mount_collision_pair[0],
+                    mount_collision_pair[1],
+                )
+
+                mount_collision = (
+                    bool(mount_result[0])
+                    if isinstance(mount_result, (list, tuple))
+                    else bool(mount_result)
+                )
+
+                if mount_collision:
+                    mount_collision_frames.append(frame)
+
+                    colliding_objects = _collision_object_names(
+                        sim, mount_result
+                    )
+
+                    raise RuntimeError(
+                        f"Mounting plate collision detected "
+                        f"during {phase} at frame {frame}; "
+                        f"objects={colliding_objects}; "
+                        f"tip_error_mm={error_mm:.3f}"
+                    )
             if frame_delay_s > 0:
                 time.sleep(frame_delay_s)
     finally:
@@ -536,13 +718,28 @@ def run_remote_simulation(
         if needle_self_collision_pair is not None
         else None
     )
+    result["mount_collision_free"] = (
+        len(mount_collision_frames) == 0
+        if mount_collision_pair is not None
+        else None
+    )
     result["max_tip_position_error_mm"] = max(errors_mm) if errors_mm else None
     result["final_tip_position_error_mm"] = errors_mm[-1] if errors_mm else None
+    result["max_joint_step_rad"] = max(joint_steps) if joint_steps else 0.0
+    result["total_joint_motion_rad"] = float(sum(np.sum(np.abs(step)) for step in
+                                                    (_shortest_joint_delta(np.asarray(joint_history[i]),
+                                                                           np.asarray(joint_history[i - 1]))
+                                                     for i in range(1, len(joint_history))))) if len(joint_history) > 1 else 0.0
+    finite_limit_margins = [margin for margin in limit_margins if np.isfinite(margin)]
+    result["min_joint_limit_margin_rad"] = (
+        min(finite_limit_margins) if finite_limit_margins else None
+    )
     result["ik_statuses"] = [str(status) for status in ik_statuses]
     result["collision_frames"] = [frame for frame in collision_frames if frame is not None]
     result["needle_self_collision_frames"] = [
         frame for frame in needle_self_collision_frames if frame is not None
     ]
+    result["mount_collision_frames"] = mount_collision_frames
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -567,6 +764,9 @@ def _parse_args():
     parser.add_argument("--robot-collision-collection")
     parser.add_argument("--environment-collision-collection")
     parser.add_argument("--steps", type=int, default=100)
+    parser.add_argument("--max-cartesian-step-mm", type=float, default=DEFAULT_MAX_CARTESIAN_STEP_MM)
+    parser.add_argument("--max-joint-step-rad", type=float, default=DEFAULT_IK_JOINT_MAX_STEP_RAD)
+    parser.add_argument("--joint-limit-margin-rad", type=float, default=DEFAULT_JOINT_LIMIT_MARGIN_RAD)
     parser.add_argument(
         "--frame-delay",
         type=float,
@@ -605,6 +805,9 @@ if __name__ == "__main__":
         robot_collision_collection=args.robot_collision_collection,
         environment_collision_collection=args.environment_collision_collection,
         steps=args.steps,
+        max_cartesian_step_mm=args.max_cartesian_step_mm,
+        max_joint_step_rad=args.max_joint_step_rad,
+        joint_limit_margin_rad=args.joint_limit_margin_rad,
         allow_no_collision_check=args.allow_no_collision_check,
         kinematic_only=args.kinematic_only,
         initial_joint_angles_rad=args.initial_joint_angles_rad,

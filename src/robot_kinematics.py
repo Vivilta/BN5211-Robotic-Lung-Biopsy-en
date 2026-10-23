@@ -4,6 +4,29 @@ import numpy as np
 
 from robot_geometry import rotation_from_z_axis
 
+
+# The UR5 model used by the CoppeliaSim scene exposes revolute joints with a
+# nominal +/-2*pi interval.  Keeping this contract in one module avoids the
+# analytical planner and the simulator silently using different limits.
+UR5_JOINT_LIMITS_RAD = np.tile(np.asarray([[-2.0 * np.pi, 2.0 * np.pi]], dtype=float), (6, 1))
+UR5_JOINT_LIMIT_MARGIN_RAD = np.deg2rad(5.0)
+
+
+def wrap_to_pi(angle):
+    """Wrap revolute-joint differences to the shortest signed difference."""
+    return (np.asarray(angle, dtype=float) + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def joint_limit_margin_rad(joint_angles, limits=UR5_JOINT_LIMITS_RAD):
+    """Return the smallest distance from a configuration to any joint limit."""
+    q = np.asarray(joint_angles, dtype=float)
+    if q.shape != (6,):
+        raise ValueError("joint_angles must contain six values")
+    limits = np.asarray(limits, dtype=float)
+    if limits.shape != (6, 2):
+        raise ValueError("limits must have shape (6, 2)")
+    return float(np.min(np.minimum(q - limits[:, 0], limits[:, 1] - q)))
+
 class UR5Kinematics:
     """
     UR5 6-DOF 机械臂运动学求解器 (基于标准 DH 参数)
@@ -42,16 +65,29 @@ class UR5Kinematics:
         tol=0.5,
         orientation_tol=1e-3,
         orientation_weight_mm=100.0,
+        joint_limits=UR5_JOINT_LIMITS_RAD,
+        joint_limit_margin_rad=UR5_JOINT_LIMIT_MARGIN_RAD,
     ):
         """
         阻尼最小二乘法 (Damped Least Squares / Levenberg-Marquardt) 数值逆运动学求解
         target_pose: 4x4 目标齐次变换矩阵
         """
+        limits = np.asarray(joint_limits, dtype=float)
+        if limits.shape != (6, 2) or np.any(limits[:, 1] <= limits[:, 0]):
+            raise ValueError("joint_limits must have shape (6, 2) with upper > lower")
+        margin = float(joint_limit_margin_rad)
+        if margin < 0 or np.any((limits[:, 1] - limits[:, 0]) <= 2.0 * margin):
+            raise ValueError("joint_limit_margin_rad is incompatible with joint_limits")
+        lower = limits[:, 0] + margin
+        upper = limits[:, 1] - margin
         if initial_q is None:
             # 默认给一个典型的朝前弯曲工作位姿
             q = np.array([0.0, -np.pi/4, np.pi/2, -np.pi/4, np.pi/2, 0.0])
         else:
             q = np.array(initial_q, dtype=float)
+        if q.shape != (6,) or not np.isfinite(q).all():
+            raise ValueError("initial_q must contain six finite values")
+        q = np.clip(q, lower, upper)
 
         target_pos = target_pose[:3, 3]
         target_rot = target_pose[:3, :3]
@@ -99,9 +135,12 @@ class UR5Kinematics:
             J_dls = np.dot(J.T, np.linalg.inv(np.dot(J, J.T) + damping**2 * np.eye(6)))
             dq = np.dot(J_dls, err)
 
+            # Keep every numerical IK iterate inside a conservative interior
+            # of the configured joint interval.  This prevents a solver from
+            # converging to a mathematically valid but mechanically unusable
+            # branch that is sitting on a hard stop.
             q += dq
-            # 限制在 [-2pi, 2pi] 范围内
-            q = np.clip(q, -2.0 * np.pi, 2.0 * np.pi)
+            q = np.clip(q, lower, upper)
 
         final_pose = self.forward_kinematics(q)
         final_pos_err = np.linalg.norm(target_pose[:3, 3] - final_pose[:3, 3])

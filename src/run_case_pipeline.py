@@ -27,10 +27,7 @@ from main_pipeline import run_end_to_end_biopsy_pipeline
 from robot_geometry import patient_to_robot_base_for_mount_height
 
 
-DEFAULT_CHECKPOINT = (
-    "/Users/vivi/Documents/BN5211/Final Project/训练好的/"
-    "3d_resnet_cbam-epoch=29-val_acc=0.84.ckpt"
-)
+DEFAULT_CHECKPOINT = "models/checkpoints_attention/3d_resnet_cbam-epoch=29-val_acc=0.84.ckpt"
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -357,12 +354,22 @@ def run_case(
         from create_coppeliasim_scene import create_scene
         from coppeliasim_remote import run_remote_simulation
 
-        scene_initial_joint_angles = plan.get("analytical_ik", {}).get("joint_angles_rad")
+        # The analytical DH solver may return an equivalent branch shifted by
+        # multiples of 2*pi.  Use its branch only after wrapping each revolute
+        # angle to the shortest representation; otherwise it can bias simIK
+        # toward a hard-stop-adjacent seed even though a safer equivalent
+        # configuration exists.  An explicit configuration seed still wins.
+        scene_initial_joint_angles = config.get("initial_ik_seed_rad")
         if scene_initial_joint_angles is None:
-            scene_initial_joint_angles = config.get(
-                "initial_ik_seed_rad",
-                [0.0, -math.pi / 2, 0.0, -math.pi / 2, 0.0, 0.0],
-            )
+            scene_initial_joint_angles = plan.get("analytical_ik", {}).get("joint_angles_rad")
+        if scene_initial_joint_angles is None:
+            scene_initial_joint_angles = [
+                0.0, -math.pi / 2, 0.0, -math.pi / 2, 0.0, 0.0
+            ]
+        scene_initial_joint_angles = [
+            float((float(angle) + math.pi) % (2.0 * math.pi) - math.pi)
+            for angle in scene_initial_joint_angles
+        ]
         create_scene(
             output_path=str(scene_path),
             obstacle_path=str(obstacle_path),
@@ -383,14 +390,20 @@ def run_case(
                 plan["target_point_robot_base_mm"],
             ],
             trajectory_steps=int(config.get("simulation_steps", 100)),
+            max_cartesian_step_mm=float(config.get("max_cartesian_step_mm", 3.0)),
+            max_trajectory_steps=int(config.get("max_trajectory_steps", 1000)),
             needle_length_mm=float(config.get("needle_length_mm", 220.0)),
+            joint_limit_margin_rad=float(config.get("joint_limit_margin_rad", math.radians(5.0))),
+            max_joint_step_rad=float(config.get("scene_max_joint_step_rad", math.radians(20.0))),
+            simik_damping=float(config.get("simik_damping", 0.1)),
+            simik_max_iterations=int(config.get("simik_max_iterations", 150)),
             mount_height_mm=mount_height_mm,
             needle_radius_mm=float(config.get("needle_radius_mm", 4.0)),
         )
         simulation = run_remote_simulation(
             plan_path=str(plan_path),
             scene_path=str(scene_path),
-            load_scene=True,
+            load_scene=False,  #
             host=str(config.get("coppeliasim_host", "localhost")),
             port=int(config.get("coppeliasim_port", 23000)),
             robot_path=str(config.get("robot_path", "/UR5")),
@@ -399,6 +412,9 @@ def run_case(
             robot_collision_collection=str(config.get("robot_collision_collection", "/robotCollision")),
             environment_collision_collection=str(config.get("environment_collision_collection", "/patientCollision")),
             steps=int(config.get("simulation_steps", 100)),
+            max_cartesian_step_mm=float(config.get("max_cartesian_step_mm", 3.0)),
+            max_joint_step_rad=float(config.get("max_joint_step_rad", math.radians(8.0))),
+            joint_limit_margin_rad=float(config.get("joint_limit_margin_rad", math.radians(5.0))),
             kinematic_only=True,
             frame_delay_s=frame_delay,
             output_path=str(run_path),

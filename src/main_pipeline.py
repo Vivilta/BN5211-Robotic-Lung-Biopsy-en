@@ -297,8 +297,8 @@ def run_end_to_end_biopsy_pipeline(
 
 def _parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", default="/Users/vivi/Documents/BN5211/Final Project/训练好的/3d_resnet_cbam-epoch=29-val_acc=0.84.ckpt")
-    parser.add_argument("--roi", default="/Users/vivi/Documents/BN5211/Final Project/训练好的/LIDC-IDRI-0037_IL057_12.npy")
+    parser.add_argument("--checkpoint", default="models/checkpoints_attention/3d_resnet_cbam-epoch=29-val_acc=0.84.ckpt")
+    parser.add_argument("--roi", default="data/registered_rois/LIDC-IDRI-0037.npy")
     parser.add_argument("--obstacles", default="data/demo_nodules/rib_obstacles_0037.json")
     parser.add_argument("--output-plan", default="data/demo_nodules/planned_trajectory_0037.json")
     parser.add_argument(

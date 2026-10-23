@@ -72,10 +72,12 @@ src/run_case_pipeline.py           # 单病例机器人流程编排
 data/processed/                    # 本地生成的 ROI、CSV manifest 和预处理影像
 models/                             # 本地 checkpoint、日志及分析图
 data/demo_nodules/                  # 机器人流程 JSON、预览图和运行记录
-scenes/                             # CoppeliaSim 场景文件
+scenes/                             # CoppeliaSim canonical 场景文件
+docs/                               # 路径规划参考资料
+scripts/                            # 分析和诊断辅助脚本
 ```
 
-原始影像、预处理矩阵、checkpoint 和 `data/` 下的运行结果不随仓库分发。仓库包含基础/历史 CoppeliaSim 示例场景；每个新病例的场景和运行结果仍需在本机生成。`configs/cases.json` 当前含本机路径，换电脑运行前需按后文更新。
+原始影像、预处理矩阵、checkpoint 和 `data/` 下的运行结果不随仓库分发。仓库只保留源代码、测试、规划参考文档和少量 canonical 场景；CT/DICOM、ROI、checkpoint、`data/` 下的登记配置、运行结果以及本机生成的实验场景均被忽略。每个新病例的场景和运行结果需在本机生成；`configs/cases.json` 是不含机器绝对路径的配置模板，运行前请填入本地数据路径；真实病例登记配置放在本地 `data/` 下，不提交到公开仓库。
 
 ## 4. 全链路运行指南（数据到模型）
 
@@ -322,6 +324,86 @@ python src/run_case_pipeline.py \
   --scene-output scenes/robotic_lung_biopsy_0031_latest.ttt
 ```
 
+
+
+#### 5.3.1 从当前输入重新生成 0037 场景（人工复测）
+
+如果要验证当前代码是否能够生成可用场景，应从 CT、登记 ROI、病例配置和 checkpoint 重新执行 pipeline，并使用新的输出目录和新的 .ttt 文件。不要把以前生成的运行 JSON 或 .ttt 当作本次复测输入。下面命令以 LIDC-IDRI-0037 为例，使用 mount=500 mm、220 mm 针具和当前分段 AABB 障碍提取参数。`data/registration_candidates/cases_supine_mount500.json` 是本机登记配置，不随公开仓库提交；克隆后请用自己的病例配置替换它。
+
+先在仓库根目录执行 `cd /path/to/BN5211-Robotic-Lung-Biopsy-en`。终端 1：启动 CoppeliaSim 的 ZeroMQ Remote API 服务：
+
+```bash
+export PROJECT_ROOT="$(pwd)"
+export COPPELIASIM_ROOT="/Applications/coppeliaSim.app"
+"$COPPELIASIM_ROOT/Contents/MacOS/coppeliaSim" \
+  -GzmqRemoteApi.rpcPort=23000
+```
+
+终端 2：从输入重新提取障碍、规划轨迹、生成场景并运行 100 步运动学仿真：
+
+```bash
+export PROJECT_ROOT="$(pwd)"
+export COPPELIASIM_ROOT="/Applications/coppeliaSim.app"
+export PYTHONPATH="$COPPELIASIM_ROOT/Contents/Resources/programming/zmqRemoteApi/clients/python/src:$PROJECT_ROOT/src"
+
+PYTHONUNBUFFERED=1 python src/run_case_pipeline.py \
+  --config data/registration_candidates/cases_supine_mount500.json \
+  --case-id LIDC-IDRI-0037 \
+  --run-simulation \
+  --coppeliasim-port 23000 \
+  --frame-delay 0.08 \
+  --needle-length-mm 220 \
+  --mount-height-mm 500 \
+  --segment-slices 5 \
+  --min-volume-voxels 40 \
+  --output-dir data/case_runs/LIDC-IDRI-0037_manual_fresh \
+  --scene-output scenes/robotic_lung_biopsy_0037_manual_fresh.ttt
+```
+
+如果你使用 Conda，请先激活包含项目依赖的环境；也可以把 python 替换为该环境的解释器。命令成功后应看到新生成的 scenes/robotic_lung_biopsy_0037_manual_fresh.ttt，以及同一输出目录中的 rib_obstacles_0037_segmented.json、planned_trajectory_0037.json、coppeliasim_run_0037_segmented.json 和 pipeline_summary_0037.json。
+
+终端 3：关闭 CoppeliaSim 后或保持其运行，检查本次运行 JSON。字段名是 phase_sequence；不要读取不存在的 phases，也不要把输出路径写成旧的 data/case_runs/manual_test_0037/coppeliasim_run_0037.json：
+
+```bash
+python - <<'PY2'
+import json
+from pathlib import Path
+
+path = Path("data/case_runs/LIDC-IDRI-0037_manual_fresh/coppeliasim_run_0037_segmented.json")
+d = json.loads(path.read_text())
+required = {"approach", "approach_to_entry", "insertion"}
+phases = set(d.get("phase_sequence", []))
+assert d.get("executed_steps", 0) >= 100
+assert required <= phases, phases
+assert d.get("collision_check_available") is True
+assert d.get("needle_self_collision_check_available") is True
+assert d.get("mount_collision_check_available") is True
+assert d.get("collision_free") is True
+assert d.get("needle_self_collision_free") is True
+assert d.get("mount_collision_free") is True
+assert not d.get("collision_frames")
+assert not d.get("needle_self_collision_frames")
+assert not d.get("mount_collision_frames")
+assert d.get("max_tip_position_error_mm") is not None
+assert d["max_tip_position_error_mm"] < 1.0
+assert d.get("max_joint_step_rad") is not None
+assert d.get("total_joint_motion_rad") is not None
+margin = d.get("min_joint_limit_margin_rad")
+threshold = d.get("joint_limit_margin_threshold_rad")
+if margin is not None and threshold is not None:
+    assert margin + 1e-6 >= threshold, (margin, threshold)
+print("PASS")
+for key in (
+    "executed_steps", "max_tip_position_error_mm", "max_joint_step_rad",
+    "total_joint_motion_rad", "min_joint_limit_margin_rad",
+    "joint_limit_margin_threshold_rad",
+):
+    print(f"{key}: {d.get(key)}")
+PY2
+```
+
+本次复测通过时，executed_steps=100、最大针尖误差约 0.387 mm，患者、针具自碰撞和安装板碰撞检查均可用且无碰撞帧。该结果只说明当前软件场景和近似障碍模型下的运动学仿真通过。
+
 默认教学场景使用 `220 mm` 针具并将 overhead mount 抬高 `200 mm`，同时补偿 demo 坐标变换，使 CT 患者几何在世界坐标中不移动；它会改变机械臂伸展姿态，不改变针路相对患者的位置。局部障碍提取默认使用 `segment_slices=5` 和 `min_volume_voxels=40`。规划器按 4 mm 针半径加 2 mm 额外余量扩张骨候选 AABB，并检查从预接近到靶点的针体扫掠。场景生成阶段还会对 `approach -> entry -> target` 的整段笛卡尔轨迹逐帧执行 simIK，并检查 UR5/针具与患者障碍、针具与机械臂自碰撞；只有整段预检通过才保存场景。上述数值是仿真假设，不是临床器械规格。ZeroMQ 客户端路径需按本机 CoppeliaSim 安装位置调整。
 
 针长、顶部安装高度和障碍分段参数可以针对一次验证运行覆盖，不会修改配置文件。例如：
@@ -380,6 +462,9 @@ python src/run_case_pipeline.py \
 **没有无碰撞路径/IK 失败**：检查 target、变换、预览和 UR5 构型；不要为获得成功日志而更改临床器械参数或禁用碰撞检测。
 
 **Remote API 不可用**：确认 CoppeliaSim 已启动且端口为 `23000`，并在 `PYTHONPATH` 中使用该安装自带的 Python ZeroMQ 客户端。
+
+**旧场景和结果的处理**：scenes/robotic_lung_biopsy_0037_fresh.ttt、scenes/robotic_lung_biopsy_0037_supine.ttt 等历史场景没有当前执行器使用的安装板碰撞集合，不应作为新版复测场景；0037_needle15 属于历史针长实验。建议先保留 robotic_lung_biopsy_0037_manual_fresh.ttt、data/case_runs/LIDC-IDRI-0037_manual_fresh/ 和 data/registration_candidates/cases_supine_mount500.json 作为可复现记录。确认不再需要历史对比后，再归档旧 .ttt 和对应运行目录；不要在未核对 provenance 前直接删除。
+
 
 ## 8. 验证
 

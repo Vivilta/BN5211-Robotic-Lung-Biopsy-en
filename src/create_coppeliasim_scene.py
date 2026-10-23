@@ -29,11 +29,18 @@ from robot_geometry import (
 
 UR5_MODEL_CANDIDATES = (
     "/Applications/coppeliaSim.app/Contents/Resources/models/robots/non-mobile/UR5.ttm",
-    "/Users/vivi/Downloads/coppeliaSim.app/Contents/Resources/models/robots/non-mobile/UR5.ttm",
 )
 DEFAULT_OUTPUT = "scenes/robotic_lung_biopsy.ttt"
 DEFAULT_OBSTACLES = "data/demo_nodules/rib_obstacles_0037.json"
 DEFAULT_INITIAL_JOINT_ANGLES_RAD = (0.0, -math.pi / 2.0, 0.0, -math.pi / 2.0, 0.0, 0.0)
+
+# IK search defaults.  These are deliberately conservative scene-generation
+# safeguards: the saved scene must start from a joint configuration that leaves
+# room to continue along the Cartesian trajectory.
+DEFAULT_SIMIK_DAMPING = 0.1
+DEFAULT_SIMIK_MAX_ITERATIONS = 150
+DEFAULT_JOINT_LIMIT_MARGIN_RAD = math.radians(5.0)
+DEFAULT_MAX_JOINT_STEP_RAD = math.radians(20.0)
 
 
 def _resolve_ur5_model(model_path=None):
@@ -209,6 +216,88 @@ def _initial_ik_seed_candidates(seed):
     return candidates
 
 
+def _read_joint_limits(sim, joints, margin_rad=0.0):
+    """Read CoppeliaSim joint intervals as ``(cyclic, lower, upper)``.
+
+    CoppeliaSim reports a non-cyclic interval as ``(minimum, range)``.  The
+    explicit conversion here keeps the same convention for the scene-side
+    filtering and for the simIK environment.  Cyclic joints are left
+    unconstrained because their equivalent angles are valid by definition.
+    """
+    margin_rad = float(margin_rad)
+    if margin_rad < 0.0:
+        raise ValueError("joint limit margin must be non-negative")
+
+    limits = []
+    for joint in joints:
+        try:
+            cyclic, interval = sim.getJointInterval(joint)
+        except Exception as exc:
+            raise RuntimeError(
+                "Could not read a UR5 joint interval from CoppeliaSim; "
+                "joint-limit validation is required for scene generation."
+            ) from exc
+        if cyclic:
+            limits.append({"cyclic": True, "lower": None, "upper": None})
+            continue
+
+        interval = np.asarray(interval, dtype=float).reshape(-1)
+        if interval.size < 2 or not np.isfinite(interval[:2]).all():
+            raise RuntimeError(f"Invalid CoppeliaSim joint interval: {interval!r}")
+        lower = float(interval[0])
+        upper = lower + float(interval[1])
+        if upper <= lower:
+            raise RuntimeError(f"Invalid CoppeliaSim joint interval: {interval.tolist()!r}")
+        effective_lower = lower + margin_rad
+        effective_upper = upper - margin_rad
+        if effective_upper <= effective_lower:
+            raise ValueError(
+                f"Joint interval is narrower than twice the configured margin: "
+                f"[{lower:.6f}, {upper:.6f}] rad"
+            )
+        limits.append(
+            {
+                "cyclic": False,
+                "lower": effective_lower,
+                "upper": effective_upper,
+            }
+        )
+    return limits
+
+
+def _within_joint_limits(joint_angles, limits, atol=1e-9):
+    """Return whether every non-cyclic joint is inside its safe interval."""
+    joint_angles = np.asarray(joint_angles, dtype=float)
+    if joint_angles.shape != (len(limits),):
+        raise ValueError("Joint vector and limit list must have the same length")
+    if not np.isfinite(joint_angles).all():
+        return False
+    for angle, limit in zip(joint_angles, limits):
+        if limit["cyclic"]:
+            continue
+        if angle < limit["lower"] - atol or angle > limit["upper"] + atol:
+            return False
+    return True
+
+
+def _minimum_joint_limit_margin(joint_angles, limits):
+    """Return the smallest remaining safe margin in radians."""
+    joint_angles = np.asarray(joint_angles, dtype=float)
+    margins = [
+        min(float(angle) - limit["lower"], limit["upper"] - float(angle))
+        for angle, limit in zip(joint_angles, limits)
+        if not limit["cyclic"]
+    ]
+    return min(margins) if margins else float("inf")
+
+
+def _wrapped_joint_delta(current, previous):
+    """Shortest signed angular difference for a pair of six-joint vectors."""
+    current = np.asarray(current, dtype=float)
+    previous = np.asarray(previous, dtype=float)
+    return np.arctan2(np.sin(current - previous), np.cos(current - previous))
+
+
 def _collision_result(sim, first_collection, second_collection):
     result = sim.checkCollision(first_collection, second_collection)
     if isinstance(result, (list, tuple)):
@@ -223,16 +312,24 @@ def _object_alias(sim, handle):
         return str(handle)
 
 
-def _sample_trajectory_points(points, total_steps):
-    """Sample a Cartesian polyline for scene-time collision preflight."""
+def _sample_trajectory_points(points, total_steps, max_segment_mm=3.0, max_steps=1000):
+    """Sample a Cartesian polyline with a spatial step bound.
+
+    ``total_steps`` is retained as a lower bound for compatibility.  The
+    adaptive bound is what prevents a long needle sweep from jumping over a
+    thin AABB between two collision checks.
+    """
     points = [np.asarray(point, dtype=float) for point in points]
-    if len(points) < 2 or any(point.shape != (3,) for point in points):
-        raise ValueError("Trajectory points must contain at least two 3D points")
+    if len(points) < 2 or any(point.shape != (3,) or not np.isfinite(point).all() for point in points):
+        raise ValueError("Trajectory points must contain at least two finite 3D points")
     if total_steps < 2:
         raise ValueError("trajectory_steps must be at least 2")
+    if max_segment_mm <= 0 or max_steps < 2:
+        raise ValueError("max_segment_mm must be positive and max_steps >= 2")
 
     lengths = np.asarray(
-        [np.linalg.norm(points[index + 1] - points[index]) for index in range(len(points) - 1)],
+        [np.linalg.norm(points[index + 1] - points[index])
+         for index in range(len(points) - 1)],
         dtype=float,
     )
     active = np.flatnonzero(lengths > 1e-9)
@@ -240,15 +337,26 @@ def _sample_trajectory_points(points, total_steps):
         return [points[0].copy()]
 
     intervals = np.zeros(len(lengths), dtype=int)
-    intervals[active] = 1
-    remaining = total_steps - 1 - len(active)
-    if remaining < 0:
-        raise ValueError("trajectory_steps is too small for the trajectory segments")
-    proportions = lengths[active] / lengths[active].sum()
-    extra = np.floor(remaining * proportions).astype(int)
-    intervals[active] += extra
-    for index in range(remaining - int(extra.sum())):
-        intervals[active[np.argmax(lengths[active])]] += 1
+    intervals[active] = np.maximum(
+        1, np.ceil(lengths[active] / float(max_segment_mm)).astype(int)
+    )
+    requested_intervals = max(int(total_steps) - 1, int(intervals.sum()))
+    remaining = requested_intervals - int(intervals.sum())
+    if remaining:
+        proportions = lengths[active] / lengths[active].sum()
+        extra = np.floor(remaining * proportions).astype(int)
+        intervals[active] += extra
+        for index in range(remaining - int(extra.sum())):
+            intervals[active[np.argmax(lengths[active])]] += 1
+
+    if int(intervals.sum()) + 1 > int(max_steps):
+        scale = (float(max_steps) - 1.0) / float(intervals.sum())
+        intervals[active] = np.maximum(1, np.floor(intervals[active] * scale).astype(int))
+        while int(intervals.sum()) + 1 > int(max_steps):
+            longest = active[np.argmax(lengths[active] / intervals[active])]
+            if intervals[longest] <= 1:
+                break
+            intervals[longest] -= 1
 
     samples = [points[0].copy()]
     for index, count in enumerate(intervals):
@@ -304,10 +412,28 @@ def _set_initial_ik_pose_impl(
     arm_collection,
     robot_collection,
     patient_collection,
+    mount_collection,
+    mount_arm_collection,
     trajectory_points_mm=None,
     trajectory_steps=100,
+    max_cartesian_step_mm=3.0,
+    max_trajectory_steps=1000,
+    joint_limit_margin_rad=DEFAULT_JOINT_LIMIT_MARGIN_RAD,
+    max_joint_step_rad=DEFAULT_MAX_JOINT_STEP_RAD,
+    simik_damping=DEFAULT_SIMIK_DAMPING,
+    simik_max_iterations=DEFAULT_SIMIK_MAX_ITERATIONS,
 ):
     """Choose a pose whose complete planned trajectory is collision-free."""
+    if max_joint_step_rad <= 0:
+        raise ValueError("max_joint_step_rad must be positive")
+    if max_cartesian_step_mm <= 0 or max_trajectory_steps < 2:
+        raise ValueError("max_cartesian_step_mm must be positive and max_trajectory_steps >= 2")
+    if simik_damping <= 0:
+        raise ValueError("simik_damping must be positive")
+    if simik_max_iterations < 1:
+        raise ValueError("simik_max_iterations must be at least 1")
+
+    joint_limits = _read_joint_limits(sim, joints, joint_limit_margin_rad)
     target_pose = (
         np.asarray(point_mm, dtype=float) / 1000.0
     ).tolist() + rotation_to_quaternion_xyzw(
@@ -321,13 +447,19 @@ def _set_initial_ik_pose_impl(
     candidate_solutions = []
     sampled_trajectory = None
     if trajectory_points_mm is not None:
-        sampled_trajectory = _sample_trajectory_points(trajectory_points_mm, trajectory_steps)
+        sampled_trajectory = _sample_trajectory_points(
+            trajectory_points_mm, trajectory_steps, max_cartesian_step_mm, max_trajectory_steps
+        )
 
     def _create_ik_context():
         env = sim_ik.createEnvironment()
         group = sim_ik.createGroup(env)
         sim_ik.setGroupCalculation(
-            env, group, sim_ik.method_damped_least_squares, 0.1, 100
+            env,
+            group,
+            sim_ik.method_damped_least_squares,
+            float(simik_damping),
+            int(simik_max_iterations),
         )
         _, sim_to_ik, _ = sim_ik.addElementFromScene(
             env,
@@ -337,10 +469,56 @@ def _set_initial_ik_pose_impl(
             target_handle,
             sim_ik.constraint_pose,
         )
-        for joint in joints:
+        flags = int(getattr(sim_ik, "group_enabled", 1))
+        for name in (
+            "group_avoidlimits",
+            "group_stoponlimithit",
+            "group_restoreonbadlintol",
+            "group_restoreonbadangtol",
+        ):
+            value = getattr(sim_ik, name, None)
+            if value is not None:
+                flags |= int(value)
+        set_group_flags = getattr(sim_ik, "setGroupFlags", None)
+        if set_group_flags is not None and flags:
+            try:
+                set_group_flags(env, group, flags)
+            except Exception:
+                pass
+        for joint_index, joint in enumerate(joints):
             ik_joint = sim_to_ik.get(joint)
             if ik_joint is not None:
                 sim_ik.setJointMode(env, ik_joint, sim_ik.jointmode_ik)
+                set_step = getattr(sim_ik, "setJointMaxStepSize", None)
+                if set_step is not None:
+                    try:
+                        set_step(env, ik_joint, float(max_joint_step_rad))
+                    except Exception:
+                        pass
+                set_margin = getattr(sim_ik, "setJointLimitMargin", None)
+                if set_margin is not None:
+                    try:
+                        set_margin(env, ik_joint, float(joint_limit_margin_rad))
+                    except Exception:
+                        pass
+                limit = joint_limits[joint_index]
+                if not limit["cyclic"]:
+                    # simIK uses the same (minimum, range) interval convention
+                    # as sim.getJointInterval().  Keep a margin at both ends.
+                    set_interval = getattr(sim_ik, "setJointInterval", None)
+                    if set_interval is not None:
+                        try:
+                            set_interval(
+                                env,
+                                ik_joint,
+                                False,
+                                [
+                                    float(limit["lower"]),
+                                    float(limit["upper"] - limit["lower"]),
+                                ],
+                            )
+                        except Exception:
+                            pass
         return env, group
 
     for mount_sign in tip_mount_signs:
@@ -368,6 +546,11 @@ def _set_initial_ik_pose_impl(
             ).tolist()
             sim.setObjectPose(target_handle, robot_handle, target_pose)
             for seed in _initial_ik_seed_candidates(initial_joint_angles_rad):
+                # Do not ask simIK to start from a seed already outside the
+                # safe interval.  This avoids equivalent branches that begin
+                # at a hard stop and are then difficult to continue smoothly.
+                if not _within_joint_limits(seed, joint_limits):
+                    continue
                 for joint, angle in zip(joints, seed):
                     sim.setJointPosition(joint, float(angle))
 
@@ -401,9 +584,37 @@ def _set_initial_ik_pose_impl(
                         )
                         colliding_pairs[pair_names or ("robot/patient",)] += 1
                         continue
+
+                    # Reject IK configurations intersecting the mounting plate.
+                    mount_collision, mount_pairs = _collision_result(
+                        sim,
+                        mount_arm_collection,
+                        mount_collection,
+                    )
+
+                    if mount_collision:
+                        colliding_solution_count += 1
+
+                        pair_names = tuple(
+                            sorted(
+                                _object_alias(sim, handle)
+                                for handle in mount_pairs
+                            )
+                        )
+
+                        colliding_pairs[
+                            pair_names or ("robot/mount",)
+                        ] += 1
+
+                        continue
+
                     joint_angles = np.asarray(
                         [sim.getJointPosition(joint) for joint in joints], dtype=float
                     )
+                    if not _within_joint_limits(joint_angles, joint_limits):
+                        colliding_solution_count += 1
+                        colliding_pairs[("joint_limit_margin",)] += 1
+                        continue
                     # Preserve the analytical IK branch whenever possible. A
                     # weak seed penalty can switch q4 by pi for a tiny q3
                     # posture improvement, which is a visually large and
@@ -421,10 +632,15 @@ def _set_initial_ik_pose_impl(
                             )
                         )
                     )
-                    score = seed_cost + 0.05 * posture_cost
+                    limit_margin = _minimum_joint_limit_margin(joint_angles, joint_limits)
+                    # Keep the seed distance primary, while preferring a
+                    # branch with more room to move away from joint stops.
+                    limit_cost = 0.02 / max(limit_margin, 1e-3)
+                    score = seed_cost + 0.05 * posture_cost + limit_cost
                     candidate_solutions.append(
                         {
                             "score": score,
+                            "limit_margin_rad": float(limit_margin),
                             "mount_sign": mount_sign,
                             "roll_deg": roll_deg,
                             "joint_angles": joint_angles.copy(),
@@ -436,12 +652,12 @@ def _set_initial_ik_pose_impl(
                     if env is not None:
                         sim_ik.eraseEnvironment(env)
 
-    # Initial collision checks are cheap enough to run for all IK branches,
-    # but full trajectory preflight is not: it can require hundreds of remote
-    # collision calls per branch. Rank the initially safe branches first and
-    # run the same complete preflight only until one branch passes.
+    # Initial collision checks are cheap enough to run for all IK branches.
+    # Run the complete trajectory preflight for every initially safe branch so
+    # the selected posture is based on the whole path, rather than whichever
+    # candidate happens to pass first.
     candidate_solutions.sort(key=lambda candidate: candidate["score"])
-    best_solution = None
+    trajectory_candidates = []
     for candidate in candidate_solutions:
         mount_sign = candidate["mount_sign"]
         roll_deg = candidate["roll_deg"]
@@ -470,6 +686,9 @@ def _set_initial_ik_pose_impl(
             sim.setJointPosition(joint, float(angle))
 
         trajectory_collision = False
+        trajectory_joint_cost = 0.0
+        trajectory_max_joint_step = 0.0
+        previous_joint_angles = joint_angles.copy()
         env = None
         try:
             env, group = _create_ik_context()
@@ -487,6 +706,27 @@ def _set_initial_ik_pose_impl(
                         trajectory_collision = True
                         colliding_pairs[("trajectory_ik_failure",)] += 1
                         break
+
+                    path_joint_angles = np.asarray(
+                        [sim.getJointPosition(joint) for joint in joints], dtype=float
+                    )
+                    if not _within_joint_limits(path_joint_angles, joint_limits):
+                        trajectory_collision = True
+                        colliding_pairs[("trajectory_joint_limit_margin",)] += 1
+                        break
+                    joint_delta = _wrapped_joint_delta(
+                        path_joint_angles, previous_joint_angles
+                    )
+                    max_joint_step = float(np.max(np.abs(joint_delta)))
+                    if max_joint_step > float(max_joint_step_rad):
+                        trajectory_collision = True
+                        colliding_pairs[("trajectory_joint_step",)] += 1
+                        break
+                    trajectory_joint_cost += float(np.linalg.norm(joint_delta))
+                    trajectory_max_joint_step = max(
+                        trajectory_max_joint_step, max_joint_step
+                    )
+                    previous_joint_angles = path_joint_angles
 
                     path_collided, path_pairs = _collision_result(
                         sim, robot_collection, patient_collection
@@ -508,6 +748,28 @@ def _set_initial_ik_pose_impl(
                         )
                         colliding_pairs[pair_names or ("trajectory needle/arm",)] += 1
                         break
+                    # Check mounting-plate collision at every sampled trajectory pose.
+                    mount_collided, mount_pairs = _collision_result(
+                        sim,
+                        mount_arm_collection,
+                        mount_collection,
+                    )
+
+                    if mount_collided:
+                        trajectory_collision = True
+
+                        pair_names = tuple(
+                            sorted(
+                                _object_alias(sim, handle)
+                                for handle in mount_pairs
+                            )
+                        )
+
+                        colliding_pairs[
+                            pair_names or ("trajectory robot/mount",)
+                        ] += 1
+
+                        break
         finally:
             if env is not None:
                 sim_ik.eraseEnvironment(env)
@@ -515,8 +777,24 @@ def _set_initial_ik_pose_impl(
         if trajectory_collision:
             trajectory_rejection_count += 1
             continue
-        best_solution = candidate
-        break
+        candidate = dict(candidate)
+        candidate["trajectory_joint_cost"] = float(trajectory_joint_cost)
+        candidate["trajectory_max_joint_step_rad"] = float(trajectory_max_joint_step)
+        trajectory_candidates.append(candidate)
+
+    best_solution = None
+    if trajectory_candidates:
+        # Prefer the seed/limit score, then smooth continuation, then the
+        # remaining limit margin.  All terms are computed only for complete
+        # collision-free trajectories.
+        best_solution = min(
+            trajectory_candidates,
+            key=lambda candidate: (
+                candidate["score"] + 0.05 * candidate["trajectory_joint_cost"],
+                candidate["trajectory_max_joint_step_rad"],
+                -candidate["limit_margin_rad"],
+            ),
+        )
 
     if best_solution is not None:
         mount_sign = best_solution["mount_sign"]
@@ -550,7 +828,10 @@ def _set_initial_ik_pose_impl(
         print(
             "Selected collision-free UR5 posture (full-trajectory preflight) "
             f"(mount sign={mount_sign:+d}, tool roll={roll_deg} deg, "
-            f"q3={joint_angles[2]:.3f} rad, seed={np.round(seed, 3).tolist()})"
+            f"q3={joint_angles[2]:.3f} rad, "
+            f"limit_margin={best_solution['limit_margin_rad']:.3f} rad, "
+            f"max_step={best_solution.get('trajectory_max_joint_step_rad', 0.0):.3f} rad, "
+            f"seed={np.round(seed, 3).tolist()})"
         )
         return
 
@@ -559,6 +840,7 @@ def _set_initial_ik_pose_impl(
         f"IK successes={ik_success_count}, initially safe candidates={len(candidate_solutions)}, "
         f"colliding solutions={colliding_solution_count}, "
         f"trajectory rejections={trajectory_rejection_count}, "
+        f"complete trajectory candidates={len(trajectory_candidates)}, "
         f"last simIK status={last_status}, most frequent colliding pairs="
         f"{colliding_pairs.most_common(5)}. Check the mount, target, and patient obstacle geometry."
     )
@@ -630,13 +912,24 @@ def create_scene(
     initial_needle_axis=None,
     trajectory_points_mm=None,
     trajectory_steps=100,
+    max_cartesian_step_mm=3.0,
+    max_trajectory_steps=1000,
     needle_length_mm=220.0,
     mount_height_mm=0.0,
     needle_radius_mm=4.0,
+    joint_limit_margin_rad=DEFAULT_JOINT_LIMIT_MARGIN_RAD,
+    max_joint_step_rad=DEFAULT_MAX_JOINT_STEP_RAD,
+    simik_damping=DEFAULT_SIMIK_DAMPING,
+    simik_max_iterations=DEFAULT_SIMIK_MAX_ITERATIONS,
 ):
     output_path = os.path.abspath(output_path)
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     mount_height_mm = float(mount_height_mm)
+    print("\n[SCENE GEOMETRY]")
+    print(f"Needle radius: {needle_radius_mm} mm")
+    print(f"Needle diameter: {2 * needle_radius_mm} mm")
+    print(f"Needle length: {needle_length_mm} mm")
+    print(f"Mount height: {mount_height_mm} mm")
     obstacles = _load_obstacles(
         obstacle_path, max_obstacles, patient_to_robot_transform, mount_height_mm
     )
@@ -658,7 +951,21 @@ def create_scene(
         [0.0, 0.0, mount_height_mm / 1000.0, 1.0, 0.0, 0.0, 0.0],
     )
     _make_robot_non_dynamic(sim, ur5)
-    _create_robot_base(sim, mount_height_mm)
+
+    base_plate = _create_robot_base(
+        sim, mount_height_mm
+    )
+
+    mount_collection = sim.createCollection(0)
+    sim.setCollectionName(
+        mount_collection, "mountCollision"
+    )
+    sim.addItemToCollection(
+        mount_collection,
+        sim.handle_single,
+        base_plate,
+        0,
+    )
     joints = sim.getObjectsInTree(ur5, sim.object_joint_type, 0)
     if len(joints) != 6:
         raise RuntimeError(f"Expected 6 UR5 joints, found {len(joints)}")
@@ -691,6 +998,39 @@ def create_scene(
         if shape != needle and shape not in wrist_shapes:
             sim.addItemToCollection(arm_collection, sim.handle_single, shape, 0)
 
+    # Moving robot links vs overhead mounting plate.
+    # Exclude the fixed-base shapes and include the wrist and needle.
+    mount_arm_collection = sim.createCollection(0)
+    sim.setCollectionName(mount_arm_collection, "mountArmCollision")
+
+    all_shapes = sim.getObjectsInTree(
+        ur5, sim.object_shape_type, 0
+    )
+
+    base_joint = joints[0]
+    moving_shapes = set(
+        sim.getObjectsInTree(base_joint, sim.object_shape_type, 0)
+    )
+
+    # The needle is also a moving collision object.
+    moving_shapes.add(needle)
+
+    for shape in moving_shapes:
+        sim.addItemToCollection(
+            mount_arm_collection,
+            sim.handle_single,
+            shape,
+            0,
+        )
+
+    print("[MOUNT] Moving collision shapes:")
+
+    for shape in sorted(moving_shapes):
+        print(
+            "  ",
+            shape,
+            _object_alias(sim, shape)
+        )
     patient_collection = sim.createCollection(0)
     sim.setCollectionName(patient_collection, "patientCollision")
     for index, obstacle in enumerate(obstacles):
@@ -723,8 +1063,16 @@ def create_scene(
             arm_collection,
             robot_collection,
             patient_collection,
+            mount_collection,
+            mount_arm_collection,
             trajectory_points_mm=trajectory_points_mm,
             trajectory_steps=trajectory_steps,
+            max_cartesian_step_mm=max_cartesian_step_mm,
+            max_trajectory_steps=max_trajectory_steps,
+            joint_limit_margin_rad=joint_limit_margin_rad,
+            max_joint_step_rad=max_joint_step_rad,
+            simik_damping=simik_damping,
+            simik_max_iterations=simik_max_iterations,
         )
 
     _configure_overview_camera(sim, view_target_robot_base_mm, mount_height_mm)
@@ -752,6 +1100,12 @@ def _parse_args():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=23000)
     parser.add_argument("--ur5-model", help="Path to CoppeliaSim's UR5.ttm model")
+    parser.add_argument("--max-cartesian-step-mm", type=float, default=3.0)
+    parser.add_argument("--max-trajectory-steps", type=int, default=1000)
+    parser.add_argument("--joint-limit-margin-rad", type=float, default=DEFAULT_JOINT_LIMIT_MARGIN_RAD)
+    parser.add_argument("--max-joint-step-rad", type=float, default=DEFAULT_MAX_JOINT_STEP_RAD)
+    parser.add_argument("--simik-damping", type=float, default=DEFAULT_SIMIK_DAMPING)
+    parser.add_argument("--simik-max-iterations", type=int, default=DEFAULT_SIMIK_MAX_ITERATIONS)
     parser.add_argument("--initial-tool-point-mm", nargs=3, type=float)
     parser.add_argument("--initial-needle-axis", nargs=3, type=float)
     parser.add_argument(
@@ -800,4 +1154,10 @@ if __name__ == "__main__":
         ur5_model_path=args.ur5_model,
         initial_tool_point_mm=args.initial_tool_point_mm,
         initial_needle_axis=args.initial_needle_axis,
+        max_cartesian_step_mm=args.max_cartesian_step_mm,
+        max_trajectory_steps=args.max_trajectory_steps,
+        joint_limit_margin_rad=args.joint_limit_margin_rad,
+        max_joint_step_rad=args.max_joint_step_rad,
+        simik_damping=args.simik_damping,
+        simik_max_iterations=args.simik_max_iterations,
     )

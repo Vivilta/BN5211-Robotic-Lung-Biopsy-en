@@ -1,5 +1,4 @@
-忽略所有医学影像原始数据和预处理大矩阵文件
-
+# Local medical imaging data and generated arrays
 data/
 *.npy
 *.mhd
@@ -7,26 +6,27 @@ data/
 *.dcm
 *.zraw
 
-忽略 Python 缓存文件
-
-pycache/
-*.pyc
-.ipynb_checkpoints/
-
-忽略环境配置和系统隐藏文件
-
-.env
-.DS_Store
-.vscode/
-
-==================================
-
-新增：忽略深度学习模型权重与训练日志
-
-==================================
-
+# Model weights and training logs
 models/
 *.ckpt
 *.pth
 *.pt
 lightning_logs/
+
+# Python and notebook caches
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Local configuration and operating-system files
+.env
+.DS_Store
+.vscode/
+
+# Generated presentation exports
+ppt_results/
+
+# Local CoppeliaSim experiments; canonical tracked scenes remain available
+scenes/*_fresh.ttt
+scenes/*_mount500*.ttt
+scenes/*_supine.ttt
