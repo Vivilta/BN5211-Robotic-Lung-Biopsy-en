@@ -1,0 +1,2 @@
+# Optional video export; install alongside the main project dependencies.
+imageio-ffmpeg>=0.5,<1

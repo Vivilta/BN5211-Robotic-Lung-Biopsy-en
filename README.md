@@ -438,6 +438,31 @@ python src/run_case_pipeline.py \
 
 人工验收只用于检查软件仿真的一致性和可解释性。当前没有完整患者胸廓、软组织、器官运动、动力学或真实机器人闭环，因此画面中针尖到达规划靶点不等同于完成了临床穿刺活检。
 
+
+### 5.5 同步目标点的视频导出（2026-10-24）
+
+新增 `scripts/record_verified_replay.py`，对应本机已用于 0031、0037、0040 的录像方法。每个原始采样同时更新 `/UR5/ikTarget` 与已验证的六个关节角，并逐帧检查实际针尖与目标点的距离。它回放已有的合格运行记录，不重新规划，也不能将失败的运行变成通过。
+
+先安装可选的视频依赖并打开 CoppeliaSim：
+
+```bash
+python -m pip install -r requirements-video.txt
+python scripts/record_verified_replay.py --case-id LIDC-IDRI-0037 --run-json data/case_runs/LIDC-IDRI-0037_manual_fresh/coppeliasim_run_0037_segmented.json --scene scenes/robotic_lung_biopsy_0037_manual_fresh.ttt --output data/videos/LIDC-IDRI-0037_synchronized_1080p.mp4 --port 23000
+```
+
+请用本机同一次成功运行生成的 JSON 和 `.ttt` 替换示例路径。脚本会打开该场景；请先保存模拟器里尚未保存的编辑。已有输出文件不会覆盖。输出为 1920×1080、30 fps、H.264、无声 MP4；当前版本要求 100 个原始采样，每个采样保留 5 帧，约 16.7 秒。旁边的 `.replay.json` 记录逐帧最大误差和完整视频解码检查结果。视觉传感器不会绘制 dummy，因此用小球显示针尖和当前导航目标的真实位置；导航目标随轨迹变化，不是额外结节。本脚本沿用已验证的模型和关节顺序，不能用于任意结构不同的机器人场景。
+
+本机 2026-10-24 的新登记 0037（XML `138.xml`、结节 `IL057_127447`、读者 `-822877843`）使用目标体素 `[407, 288, 82]`，与配置模板中的旧目标 `[407, 289, 79]` 不同。仰卧教学摆位、安装高度 500 mm、针长 220 mm，教学坐标变换将目标放在机器人基座坐标 `[300, 0, 600]` mm。该运行完成 100 步，三类碰撞检查均可用且无碰撞帧，最大针尖误差约 0.150 mm。实际 ROI、坐标变换、初始关节姿态、运行记录和场景保留在本机 `data/` 或运行输出目录，复跑时必须使用相匹配的一组输入；不能直接把模板当作本次运行配置。
+
+Windows 安装的 UR5 模型路径与仓库默认 macOS 搜索路径不同。可使用本次运行采用的模型路径覆盖方式，无需改动核心规划器：
+
+```powershell
+python scripts/run_local_case.py --ur5-model "C:/Program Files/CoppeliaRobotics/CoppeliaSimEdu/models/robots/non-mobile/UR5.ttm" --config data/registration_candidates/cases_supine_mount500.json --case-id LIDC-IDRI-0037 --run-simulation --coppeliasim-port 23000 --output-dir data/case_runs/LIDC-IDRI-0037_manual_fresh --scene-output scenes/robotic_lung_biopsy_0037_manual_fresh.ttt
+```
+
+以上配置文件仍由各电脑按登记结果准备。公开仓库不上传 CT、ROI、模型权重、视频、个人绝对路径或完整的本机运行配置。
+
+
 ## 6. 当前边界与复现注意事项
 
 - **数据路径**：`config/config.yaml`、机器人配置和若干旧脚本含本地相对/绝对路径；换电脑时需检查并调整。
