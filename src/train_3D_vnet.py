@@ -7,12 +7,12 @@ from torch.utils.data import DataLoader, random_split
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
-# 导入 3D 数据集与刚刚写好的 VNet 分类器
+# Import the 3D dataset and the VNet classifier defined above
 from dataset_3D import LungNodule3DDataset
 from model_3D_vnet import VNet3DClassifier
 
 # ==========================================
-# 🧩 3D 数据增强
+# 🧩 3D data augmentation
 # ==========================================
 class Transform3D:
     def __call__(self, tensor):
@@ -25,14 +25,14 @@ class Transform3D:
         return tensor
 
 # ==========================================
-# 🧠 PyTorch Lightning VNet 封装
+# 🧠 PyTorch Lightning VNet wrapper
 # ==========================================
 class LitLungNoduleVNet3D(pl.LightningModule):
     def __init__(self, learning_rate=1e-3):
         super().__init__()
         self.save_hyperparameters()
         
-        # 🌟 热插拔：注入 VNet3DClassifier 模型
+        # 🌟 Hot-swap in the VNet3DClassifier model
         self.model = VNet3DClassifier(num_classes=2)
         self.criterion = nn.CrossEntropyLoss()
 
@@ -65,7 +65,7 @@ class LitLungNoduleVNet3D(pl.LightningModule):
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": "val_loss"}}
 
 # ==========================================
-# 🚀 自动化训练执行入口
+# 🚀 Automated training entry point
 # ==========================================
 if __name__ == "__main__":
     MANIFEST_PATH = "data/processed/final_dataset_manifest.csv"
@@ -95,5 +95,5 @@ if __name__ == "__main__":
         callbacks=[early_stop_callback, checkpoint_callback]
     )
     
-    print("🚀 正在启动 3D-VNet 训练流水线...")
+    print("🚀 Starting the 3D-VNet training pipeline...")
     trainer.fit(lit_model, train_loader, val_loader)

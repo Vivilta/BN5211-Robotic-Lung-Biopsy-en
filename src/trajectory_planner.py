@@ -4,8 +4,9 @@ import numpy as np
 
 def ray_intersects_aabb(p_start, p_end, aabb_min, aabb_max):
     """
-    经典 3D 射线-轴对齐包围盒 (AABB) 碰撞检测算法 (Slab Method)
-    检测线段 [p_start, p_end] 是否与包围盒 [aabb_min, aabb_max] 发生几何干涉
+    Classic 3D ray-versus-axis-aligned bounding box (AABB) collision test
+    using the slab method. Check whether segment [p_start, p_end] intersects
+    the box bounded by [aabb_min, aabb_max].
     """
     d = p_end - p_start
     t_min = 0.0
@@ -13,7 +14,7 @@ def ray_intersects_aabb(p_start, p_end, aabb_min, aabb_max):
 
     for i in range(3):
         if abs(d[i]) < 1e-6:
-            # 射线与该轴平行
+            # The ray is parallel to this axis.
             if p_start[i] < aabb_min[i] or p_start[i] > aabb_max[i]:
                 return False
         else:
@@ -32,7 +33,8 @@ def ray_intersects_aabb(p_start, p_end, aabb_min, aabb_max):
 
 class BiopsyTrajectoryPlanner:
     """
-    经皮肺穿刺轨迹规划器：负责入针点搜索与直线避障
+    Percutaneous lung biopsy trajectory planner for entry-point search
+    and straight-line collision avoidance.
     """
     def __init__(self, obstacles_json_path, safety_margin_mm=2.0, needle_radius_mm=0.0):
         if not os.path.isfile(obstacles_json_path):
@@ -46,11 +48,11 @@ class BiopsyTrajectoryPlanner:
         if self.safety_margin_mm < 0 or self.needle_radius_mm < 0:
             raise ValueError("Safety margin and needle radius must be non-negative")
         self.obstacle_inflation_mm = self.safety_margin_mm + self.needle_radius_mm
-        print(f"✅ 成功载入 {len(self.obstacles)} 个肋骨障碍物包围盒。")
+        print(f"✅ Loaded {len(self.obstacles)} rib obstacle bounding boxes.")
 
     def check_collision(self, entry_pt, target_pt):
         """
-        检查从 entry_pt 到 target_pt 的直线段是否碰撞任何肋骨
+        Check whether the line segment from entry_pt to target_pt intersects a rib.
         """
         entry_pt = np.array(entry_pt)
         target_pt = np.array(target_pt)
@@ -65,7 +67,7 @@ class BiopsyTrajectoryPlanner:
             box_max += safety_margin
 
             if ray_intersects_aabb(entry_pt, target_pt, box_min, box_max):
-                return True, obs['id']  # 发生碰撞，返回碰撞的肋骨 ID
+                return True, obs['id']  # Return the ID of the intersected rib.
         return False, None
 
     def target_clearance_report(self, target_pt):
@@ -156,7 +158,7 @@ class BiopsyTrajectoryPlanner:
         target_clearance = self.target_clearance_report(target_pt)
         if target_clearance and target_clearance[0]["contains_target"]:
             print(
-                "❌ 靶点落入安全裕量扩张后的障碍 AABB，拒绝生成轨迹: "
+                "❌ Target lies inside a safety-margin-expanded obstacle AABB; refusing to generate a path: "
                 f"{target_clearance[0]['obstacle_id']}"
             )
             return None
@@ -195,13 +197,13 @@ class BiopsyTrajectoryPlanner:
                     }
                 )
 
-        print("\n================ 多方向避障轨迹规划结果 ================")
-        print(f"评估候选轨迹总数: {total_tested}")
-        print(f"安全无碰撞轨迹数: {len(candidates)}")
+        print("\n================ Multi-direction collision-free path planning ================")
+        print(f"Candidate paths evaluated: {total_tested}")
+        print(f"Collision-free paths: {len(candidates)}")
         success_rate = (len(candidates) / total_tested) * 100 if total_tested else 0.0
-        print(f"📈 候选轨迹安全成功率: {success_rate:.2f}%")
+        print(f"📈 Collision-free candidate rate: {success_rate:.2f}%")
         if not candidates:
-            print("❌ 未找到多方向无碰撞直线路径。")
+            print("❌ No collision-free straight path found across the sampled directions.")
             return None
 
         # Prefer the shortest needle path; use angular deviation only as a
@@ -210,8 +212,8 @@ class BiopsyTrajectoryPlanner:
             candidates,
             key=lambda item: (item["path_length"], item["direction_deviation_deg"]),
         )
-        print(f">> 最优入针点: {[round(c, 2) for c in best_path['entry_point']]} mm")
-        print(f">> 穿刺深度: {best_path['path_length']:.2f} mm")
+        print(f">> Best entry point: {[round(c, 2) for c in best_path['entry_point']]} mm")
+        print(f">> Insertion depth: {best_path['path_length']:.2f} mm")
         print("========================================================\n")
         return best_path
 
@@ -225,9 +227,10 @@ class BiopsyTrajectoryPlanner:
         needle_length_mm=0.0,
     ):
         """
-        在靶点正前方的体表皮肤区域内网格搜索安全入针点
-        target_pt: [x, y, z] mm
-        skin_y_coord: 假定体表胸前壁的 Y 坐标 (如果为 None，默认靶点前方 60mm)
+        Search for a safe entry point on a grid over the skin region in front
+        of the target. target_pt is [x, y, z] in mm. skin_y_coord is the assumed
+        Y coordinate of the anterior chest wall; if None, use 60 mm in front
+        of the target.
         """
         target_pt = np.asarray(target_pt, dtype=float)
         if target_pt.shape != (3,):
@@ -237,12 +240,12 @@ class BiopsyTrajectoryPlanner:
         if approach_distance_mm < 0 or needle_length_mm < 0:
             raise ValueError("approach_distance_mm and needle_length_mm must be non-negative")
         
-        # 胸壁皮肤大致位置（前胸入针）：Y 坐标比靶点靠前约 50-70mm
+        # Approximate anterior chest-wall skin location: 50-70 mm in front of the target along Y.
         if skin_y_coord is None:
             skin_y_coord = target_pt[1] - 60.0
 
         candidates = []
-        # 在靶点上方 X-Z 平面上以圆形/网格区域撒采样点
+        # Sample a circular grid region in the X-Z plane around the target.
         x_range = np.arange(target_pt[0] - search_radius, target_pt[0] + search_radius + 1e-3, step)
         z_range = np.arange(target_pt[2] - search_radius, target_pt[2] + search_radius + 1e-3, step)
 
@@ -251,7 +254,7 @@ class BiopsyTrajectoryPlanner:
 
         for x in x_range:
             for z in z_range:
-                # 只在搜索半径圆内采样
+                # Sample only within the search-radius circle.
                 dist_xy = np.sqrt((x - target_pt[0])**2 + (z - target_pt[2])**2)
                 if dist_xy > search_radius:
                     continue
@@ -275,37 +278,37 @@ class BiopsyTrajectoryPlanner:
                         "vector": ((target_pt - entry_pt) / path_length).tolist()
                     })
 
-        # 统计提案指标：轨迹可行率
+        # Calculate the proposal metric: trajectory feasibility rate.
         success_rate = (len(collision_free_paths) / total_tested) * 100 if total_tested > 0 else 0
-        print(f"\n================ 避障轨迹规划结果 ================")
-        print(f"评估入针点总数: {total_tested}")
-        print(f"安全无碰撞入针点数: {len(collision_free_paths)}")
-        print(f"📈 候选轨迹安全成功率: {success_rate:.2f}%")
+        print("\n================ Collision-avoidance planning results ================")
+        print(f"Entry points evaluated: {total_tested}")
+        print(f"Safe, collision-free entry points: {len(collision_free_paths)}")
+        print(f"📈 Collision-free candidate rate: {success_rate:.2f}%")
 
         if len(collision_free_paths) == 0:
-            print("❌ 警告：未找到安全直线路径，可能全部被骨骼遮挡！")
+            print("❌ Warning: No safe straight path found; all candidates may be obstructed by bone.")
             return None
 
-        # 临床准则优选：选择刺入深度最短（创伤最小）的路径
+        # Clinical selection criterion: choose the shortest insertion depth to minimize trauma.
         best_path = min(collision_free_paths, key=lambda p: p["path_length"])
-        print(f">> 🏆 最优安全入针点 (Entry Point): {[round(c, 2) for c in best_path['entry_point']]} mm")
-        print(f">> 🏆 靶点坐标 (Target Point): {[round(c, 2) for c in target_pt]} mm")
-        print(f">> 🏆 最优穿刺深度: {best_path['path_length']:.2f} mm")
+        print(f">> 🏆 Best safe entry point: {[round(c, 2) for c in best_path['entry_point']]} mm")
+        print(f">> 🏆 Target coordinates: {[round(c, 2) for c in target_pt]} mm")
+        print(f">> 🏆 Best insertion depth: {best_path['path_length']:.2f} mm")
         print("==================================================\n")
 
         return best_path
 
 if __name__ == "__main__":
-    # 载入刚才生成的肋骨障碍物
+    # Load the rib obstacles generated earlier.
     obs_file = r"data/demo_nodules/rib_obstacles_0037_segmented.json"
     
-    # 患者 0037 的结节物理坐标
+    # Physical nodule coordinates for patient 0037.
     target_0037 = [118.275, 20.625, -163.50]
 
     planner = BiopsyTrajectoryPlanner(obs_file)
     best_trajectory = planner.plan_multidirectional(target_0037)
 
-    # 保存最优规划结果供下一阶段机械臂使用
+    # Save the best plan for the next manipulator stage.
     if best_trajectory is not None:
         out_plan_file = r"F:\Lung-Nodule\data\demo_nodules\planned_trajectory_0037.json"
         with open(out_plan_file, "w", encoding="utf-8") as f:
@@ -313,4 +316,4 @@ if __name__ == "__main__":
                 "target_point": target_0037,
                 "best_trajectory": best_trajectory
             }, f, indent=4)
-        print(f"🎉 规划路径已保存至: {out_plan_file}")
+        print(f"🎉 Planned path saved to: {out_plan_file}")

@@ -222,7 +222,7 @@ def main():
                 .unsqueeze(0)
             )
 
-            # Grad-CAM 需要梯度，不能使用 inference_mode()
+            # Grad-CAM requires gradients, so inference_mode() cannot be used.
             cam = gradcam.generate(
                 tensor,
                 target_class=1

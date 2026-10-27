@@ -7,7 +7,7 @@ import seaborn as sns
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix, roc_curve
 from torch.utils.data import DataLoader, random_split
 
-# 导入你的 3D 数据集与模型封装
+# Import the 3D dataset and model wrappers
 from dataset_3D import LungNodule3DDataset
 from train_3D import LitLungNoduleModel          # 3D ResNet
 from train_3D_vnet import LitLungNoduleVNet3D # 3D VNet
@@ -33,19 +33,19 @@ def evaluate_model(model, val_loader):
     return np.array(all_labels), np.array(all_preds), np.array(all_probs)
 
 def print_metrics(name, y_true, y_pred, y_probs):
-    print(f"\n--- {name} 评估指标 ---")
-    print(f"💡 准确率 (Accuracy)  : {accuracy_score(y_true, y_pred):.4f}")
-    print(f"🎯 精确率 (Precision) : {precision_score(y_true, y_pred, zero_division=0):.4f}")
-    print(f"🔍 召回率 (Recall)    : {recall_score(y_true, y_pred, zero_division=0):.4f}")
-    print(f"⚖️ F1 分数 (F1-Score) : {f1_score(y_true, y_pred, zero_division=0):.4f}")
-    print(f"📈 AUC-ROC 指标       : {roc_auc_score(y_true, y_probs):.4f}")
+    print(f"\n--- {name} Evaluation Metrics ---")
+    print(f"💡 Accuracy  : {accuracy_score(y_true, y_pred):.4f}")
+    print(f"🎯 Precision : {precision_score(y_true, y_pred, zero_division=0):.4f}")
+    print(f"🔍 Recall    : {recall_score(y_true, y_pred, zero_division=0):.4f}")
+    print(f"⚖️ F1-Score : {f1_score(y_true, y_pred, zero_division=0):.4f}")
+    print(f"📈 AUC-ROC       : {roc_auc_score(y_true, y_probs):.4f}")
 
 if __name__ == "__main__":
-    print("=== 🚀 启动 3D 模型联合评估流水线 ===")
+    print("=== 🚀 Starting the 3D model evaluation pipeline ===")
     out_dir = "models/evaluation_results/"
     os.makedirs(out_dir, exist_ok=True)
     
-    # 1. 准备无数据增强的纯净验证集 (保证评估公平)
+    # 1. Prepare an unaugmented validation set for fair evaluation
     torch.manual_seed(42)
     full_dataset = LungNodule3DDataset("data/processed/final_dataset_manifest.csv", "data/processed/all_roi_cubes/", transform=None)
     train_size = int(0.8 * len(full_dataset))
@@ -54,10 +54,10 @@ if __name__ == "__main__":
     
     results = {}
     
-    # 2. 评估 3D ResNet
+    # 2. Evaluate 3D ResNet
     ckpt_resnet = get_best_ckpt("models/checkpoints/")
     if ckpt_resnet:
-        print(f"\n📦 加载 3D ResNet 最优权重: {os.path.basename(ckpt_resnet)}")
+        print(f"\n📦 Load the best 3D ResNet checkpoint: {os.path.basename(ckpt_resnet)}")
         model_resnet = LitLungNoduleModel.load_from_checkpoint(ckpt_resnet)
         y_true, y_pred, y_probs = evaluate_model(model_resnet, val_loader)
         results['ResNet3D'] = (y_true, y_pred, y_probs)
@@ -69,10 +69,10 @@ if __name__ == "__main__":
         plt.savefig(os.path.join(out_dir, '3d_resnet_cm.png'), dpi=300)
         plt.close()
 
-    # 3. 评估 3D VNet
+    # 3. Evaluate 3D VNet
     ckpt_vnet = get_best_ckpt("models/checkpoints_3d_vnet/")
     if ckpt_vnet:
-        print(f"\n📦 加载 3D VNet 最优权重: {os.path.basename(ckpt_vnet)}")
+        print(f"\n📦 Load the best 3D VNet checkpoint: {os.path.basename(ckpt_vnet)}")
         model_vnet = LitLungNoduleVNet3D.load_from_checkpoint(ckpt_vnet)
         y_true, y_pred, y_probs = evaluate_model(model_vnet, val_loader)
         results['VNet3D'] = (y_true, y_pred, y_probs)
@@ -84,7 +84,7 @@ if __name__ == "__main__":
         plt.savefig(os.path.join(out_dir, '3d_vnet_cm.png'), dpi=300)
         plt.close()
 
-    # 4. 终极杀器：绘制合并的 ROC 对比曲线
+    # 4. Plot the combined ROC comparison curve
     if len(results) == 2:
         plt.figure(figsize=(7, 6))
         colors = {'ResNet3D': 'deeppink', 'VNet3D': 'forestgreen'}
@@ -104,4 +104,4 @@ if __name__ == "__main__":
         plt.tight_layout()
         plt.savefig(os.path.join(out_dir, '3d_combined_roc.png'), dpi=300)
         plt.close()
-        print(f"\n✅ 3D 联合 ROC 对比曲线已生成！")
+        print(f"\n✅ Combined 3D ROC comparison curve generated!")

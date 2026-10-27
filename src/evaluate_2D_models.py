@@ -7,7 +7,7 @@ import seaborn as sns
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix, roc_curve
 from torch.utils.data import DataLoader, random_split
 
-# 导入你的 2D 数据集与模型封装
+# Import the 2D dataset and model wrappers
 from dataset_2D import LungNodule2DDataset
 from train_2D import LitLungNoduleModel2D       # 2D ResNet
 from train_2D_densenet import LitLungNoduleDenseNet2D # 2D DenseNet
@@ -33,19 +33,19 @@ def evaluate_model(model, val_loader):
     return np.array(all_labels), np.array(all_preds), np.array(all_probs)
 
 def print_metrics(name, y_true, y_pred, y_probs):
-    print(f"\n--- {name} 评估指标 ---")
-    print(f"💡 准确率 (Accuracy)  : {accuracy_score(y_true, y_pred):.4f}")
-    print(f"🎯 精确率 (Precision) : {precision_score(y_true, y_pred, zero_division=0):.4f}")
-    print(f"🔍 召回率 (Recall)    : {recall_score(y_true, y_pred, zero_division=0):.4f}")
-    print(f"⚖️ F1 分数 (F1-Score) : {f1_score(y_true, y_pred, zero_division=0):.4f}")
-    print(f"📈 AUC-ROC 指标       : {roc_auc_score(y_true, y_probs):.4f}")
+    print(f"\n--- {name} Evaluation Metrics ---")
+    print(f"💡 Accuracy  : {accuracy_score(y_true, y_pred):.4f}")
+    print(f"🎯 Precision : {precision_score(y_true, y_pred, zero_division=0):.4f}")
+    print(f"🔍 Recall    : {recall_score(y_true, y_pred, zero_division=0):.4f}")
+    print(f"⚖️ F1-Score : {f1_score(y_true, y_pred, zero_division=0):.4f}")
+    print(f"📈 AUC-ROC       : {roc_auc_score(y_true, y_probs):.4f}")
 
 if __name__ == "__main__":
-    print("=== 🚀 启动 2D 模型联合评估流水线 ===")
+    print("=== 🚀 Starting the 2D model evaluation pipeline ===")
     out_dir = "models/evaluation_results/"
     os.makedirs(out_dir, exist_ok=True)
     
-    # 1. 准备无数据增强的纯净验证集 (保证评估绝对公平)
+    # 1. Prepare an unaugmented validation set for fair evaluation
     torch.manual_seed(42)
     full_dataset = LungNodule2DDataset("data/processed/final_dataset_manifest.csv", "data/processed/all_roi_cubes/", transform=None)
     train_size = int(0.8 * len(full_dataset))
@@ -54,39 +54,39 @@ if __name__ == "__main__":
     
     results = {}
     
-    # 2. 评估 2D ResNet
+    # 2. Evaluate 2D ResNet
     ckpt_resnet = get_best_ckpt("models/checkpoints_2d/")
     if ckpt_resnet:
-        print(f"\n📦 加载 2D ResNet 最优权重: {os.path.basename(ckpt_resnet)}")
+        print(f"\n📦 Load the best 2D ResNet checkpoint: {os.path.basename(ckpt_resnet)}")
         model_resnet = LitLungNoduleModel2D.load_from_checkpoint(ckpt_resnet)
         y_true, y_pred, y_probs = evaluate_model(model_resnet, val_loader)
         results['ResNet18'] = (y_true, y_pred, y_probs)
         print_metrics('2D ResNet18', y_true, y_pred, y_probs)
         
-        # 画独立混淆矩阵
+        # Plot the individual confusion matrix
         plt.figure(figsize=(5, 4))
         sns.heatmap(confusion_matrix(y_true, y_pred), annot=True, fmt='d', cmap='Oranges', xticklabels=['Benign', 'Malignant'], yticklabels=['Benign', 'Malignant'])
         plt.title('Confusion Matrix (2D ResNet18)')
         plt.savefig(os.path.join(out_dir, '2d_resnet_cm.png'), dpi=300)
         plt.close()
 
-    # 3. 评估 2D DenseNet
+    # 3. Evaluate 2D DenseNet
     ckpt_densenet = get_best_ckpt("models/checkpoints_2d_densenet/")
     if ckpt_densenet:
-        print(f"\n📦 加载 2D DenseNet 最优权重: {os.path.basename(ckpt_densenet)}")
+        print(f"\n📦 Load the best 2D DenseNet checkpoint: {os.path.basename(ckpt_densenet)}")
         model_densenet = LitLungNoduleDenseNet2D.load_from_checkpoint(ckpt_densenet)
         y_true, y_pred, y_probs = evaluate_model(model_densenet, val_loader)
         results['DenseNet121'] = (y_true, y_pred, y_probs)
         print_metrics('2D DenseNet121', y_true, y_pred, y_probs)
         
-        # 画独立混淆矩阵
+        # Plot the individual confusion matrix
         plt.figure(figsize=(5, 4))
         sns.heatmap(confusion_matrix(y_true, y_pred), annot=True, fmt='d', cmap='Purples', xticklabels=['Benign', 'Malignant'], yticklabels=['Benign', 'Malignant'])
         plt.title('Confusion Matrix (2D DenseNet121)')
         plt.savefig(os.path.join(out_dir, '2d_densenet_cm.png'), dpi=300)
         plt.close()
 
-    # 4. 终极杀器：绘制合并的 ROC 对比曲线
+    # 4. Plot the combined ROC comparison curve
     if len(results) == 2:
         plt.figure(figsize=(7, 6))
         colors = {'ResNet18': 'darkorange', 'DenseNet121': 'purple'}
@@ -106,4 +106,4 @@ if __name__ == "__main__":
         plt.tight_layout()
         plt.savefig(os.path.join(out_dir, '2d_combined_roc.png'), dpi=300)
         plt.close()
-        print(f"\n✅ 2D 联合 ROC 对比曲线已生成！")
+        print(f"\n✅ Combined 2D ROC comparison curve generated!")

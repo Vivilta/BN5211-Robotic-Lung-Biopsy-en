@@ -5,16 +5,16 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  # 核心环境
+  # Core environment
   - python=3.9
   - pip
   
-  # PyTorch 与 CUDA 支持 (根据你的显卡配置，如果不带显卡可将 pytorch-cuda 移除)
+  # PyTorch and CUDA support (adjust for your GPU; remove pytorch-cuda if no GPU is available)
   - pytorch==2.1.0
   - torchvision==0.16.0
   - pytorch-cuda=11.8 
   
-  # 科学计算基础包通过 conda 安装，提升底层 C/C++ 库的兼容性
+  # Install core scientific computing packages with conda for better compatibility with underlying C/C++ libraries
   - numpy=1.26.0
   - pandas=2.1.1
   - scikit-learn=1.3.1
@@ -22,7 +22,7 @@ dependencies:
   - matplotlib=3.8.0
   - seaborn=0.13.0
   
-  # 其余医疗专用与高频迭代包通过 pip 安装
+  # Install the remaining medical-specific and frequently updated packages with pip
   - pip:
     - pytorch-lightning==2.1.0
     - tensorboard==2.14.0

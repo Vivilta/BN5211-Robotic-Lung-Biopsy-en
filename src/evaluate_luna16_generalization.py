@@ -8,7 +8,7 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 from torch.utils.data import DataLoader
 
 # ==========================================
-# 📦 导入所有 3D 与 2D 数据集和模型封装
+# 📦 Import all 3D and 2D dataset and model wrappers
 # ==========================================
 from dataset_3D import LungNodule3DDataset
 from train_3D import LitLungNoduleModel          # 3D ResNet
@@ -39,15 +39,15 @@ def evaluate_model(model, val_loader):
     return np.array(all_labels), np.array(all_preds), np.array(all_probs)
 
 def print_metrics(name, y_true, y_pred, y_probs):
-    print(f"\n--- {name} LUNA16 泛化评估指标 ---")
-    print(f"💡 准确率 (Accuracy)  : {accuracy_score(y_true, y_pred):.4f}")
-    print(f"🎯 精确率 (Precision) : {precision_score(y_true, y_pred, zero_division=0):.4f}")
-    print(f"🔍 召回率 (Recall)    : {recall_score(y_true, y_pred, zero_division=0):.4f}")
-    print(f"⚖️ F1 分数 (F1-Score) : {f1_score(y_true, y_pred, zero_division=0):.4f}")
-    print(f"📈 AUC-ROC 指标       : {roc_auc_score(y_true, y_probs):.4f}")
+    print(f"\n--- {name} LUNA16 Generalization Metrics ---")
+    print(f"💡 Accuracy  : {accuracy_score(y_true, y_pred):.4f}")
+    print(f"🎯 Precision : {precision_score(y_true, y_pred, zero_division=0):.4f}")
+    print(f"🔍 Recall    : {recall_score(y_true, y_pred, zero_division=0):.4f}")
+    print(f"⚖️ F1-Score : {f1_score(y_true, y_pred, zero_division=0):.4f}")
+    print(f"📈 AUC-ROC       : {roc_auc_score(y_true, y_probs):.4f}")
 
 if __name__ == "__main__":
-    print("=== 🚀 启动 LUNA16 跨数据集泛化能力验证 (包含2D与3D) ===")
+    print("=== 🚀 Start cross-dataset LUNA16 generalization evaluation (2D and 3D) ===")
     out_dir = "models/evaluation_results/luna16_generalization/"
     os.makedirs(out_dir, exist_ok=True)
     
@@ -55,11 +55,11 @@ if __name__ == "__main__":
     LUNA16_CUBE_DIR = "data/processed/luna16_roi_cubes/"
     
     if not os.path.exists(LUNA16_MANIFEST):
-        print(f"\n❌ 找不到 LUNA16 账本文件: {LUNA16_MANIFEST}")
+        print(f"\n❌ LUNA16 manifest not found: {LUNA16_MANIFEST}")
         exit(1)
         
     # ==========================================
-    # 🗄️ 准备 LUNA16 的 3D 与 2D 测试集加载器
+    # 🗄️ Prepare the 3D and 2D LUNA16 test data loaders
     # ==========================================
     torch.manual_seed(42)
     luna16_dataset_3d = LungNodule3DDataset(manifest_path=LUNA16_MANIFEST, cube_dir=LUNA16_CUBE_DIR, transform=None)
@@ -69,17 +69,17 @@ if __name__ == "__main__":
     luna16_dataset_2d = LungNodule2DDataset(manifest_path=LUNA16_MANIFEST, cube_dir=LUNA16_CUBE_DIR, transform=None)
     luna16_loader_2d = DataLoader(luna16_dataset_2d, batch_size=16, shuffle=False, num_workers=0)
     
-    print(f"✅ 成功加载 LUNA16 独立测试集，共计 {len(luna16_dataset_3d)} 个样本")
+    print(f"✅ Loaded the independent LUNA16 test set with {len(luna16_dataset_3d)} samples")
     
     results_3d = {}
     results_2d = {}
     
     # ==========================================
-    # 🌟 评估 3D 模型组
+    # 🌟 Evaluate the 3D models
     # ==========================================
     ckpt_resnet = get_best_ckpt("models/checkpoints/")
     if ckpt_resnet:
-        print(f"\n📦 加载 3D ResNet 最优权重进行泛化测试: {os.path.basename(ckpt_resnet)}")
+        print(f"\n📦 Load the best 3D ResNet checkpoint for generalization testing: {os.path.basename(ckpt_resnet)}")
         model_resnet = LitLungNoduleModel.load_from_checkpoint(ckpt_resnet)
         y_true, y_pred, y_probs = evaluate_model(model_resnet, luna16_loader_3d)
         results_3d['ResNet3D'] = (y_true, y_pred, y_probs)
@@ -93,7 +93,7 @@ if __name__ == "__main__":
 
     ckpt_vnet = get_best_ckpt("models/checkpoints_3d_vnet/")
     if ckpt_vnet:
-        print(f"\n📦 加载 3D VNet 最优权重进行泛化测试: {os.path.basename(ckpt_vnet)}")
+        print(f"\n📦 Load the best 3D VNet checkpoint for generalization testing: {os.path.basename(ckpt_vnet)}")
         model_vnet = LitLungNoduleVNet3D.load_from_checkpoint(ckpt_vnet)
         y_true, y_pred, y_probs = evaluate_model(model_vnet, luna16_loader_3d)
         results_3d['VNet3D'] = (y_true, y_pred, y_probs)
@@ -106,12 +106,12 @@ if __name__ == "__main__":
         plt.close()
 
     # ==========================================
-    # 🌟 评估 2D 模型组
+    # 🌟 Evaluate the 2D models
     # ==========================================
     ckpt_resnet_2d = get_best_ckpt("models/checkpoints_2d/")
     if ckpt_resnet_2d:
-        print(f"\n📦 加载 2D ResNet 最优权重进行泛化测试: {os.path.basename(ckpt_resnet_2d)}")
-        # 修正: 使用正确的类名 LitLungNoduleModel2D 实例化
+        print(f"\n📦 Load the best 2D ResNet checkpoint for generalization testing: {os.path.basename(ckpt_resnet_2d)}")
+        # Fix: instantiate using the correct class name, LitLungNoduleModel2D
         model_resnet_2d = LitLungNoduleModel2D.load_from_checkpoint(ckpt_resnet_2d)
         y_true, y_pred, y_probs = evaluate_model(model_resnet_2d, luna16_loader_2d)
         results_2d['ResNet2D'] = (y_true, y_pred, y_probs)
@@ -125,7 +125,7 @@ if __name__ == "__main__":
 
     ckpt_densenet_2d = get_best_ckpt("models/checkpoints_2d_densenet/")
     if ckpt_densenet_2d:
-        print(f"\n📦 加载 2D DenseNet 最优权重进行泛化测试: {os.path.basename(ckpt_densenet_2d)}")
+        print(f"\n📦 Load the best 2D DenseNet checkpoint for generalization testing: {os.path.basename(ckpt_densenet_2d)}")
         model_densenet_2d = LitLungNoduleDenseNet2D.load_from_checkpoint(ckpt_densenet_2d)
         y_true, y_pred, y_probs = evaluate_model(model_densenet_2d, luna16_loader_2d)
         results_2d['DenseNet2D'] = (y_true, y_pred, y_probs)
@@ -138,9 +138,9 @@ if __name__ == "__main__":
         plt.close()
 
     # ==========================================
-    # 📈 绘制 LUNA16 泛化能力 ROC 对比曲线
+    # 📈 Plot ROC comparison curves for LUNA16 generalization
     # ==========================================
-    # 绘制 3D 组
+    # Plot the 3D group
     if len(results_3d) > 0:
         plt.figure(figsize=(7, 6))
         colors_3d = {'ResNet3D': 'deeppink', 'VNet3D': 'forestgreen'}
@@ -155,9 +155,9 @@ if __name__ == "__main__":
         plt.legend(loc="lower right"); plt.grid(alpha=0.3); plt.tight_layout()
         plt.savefig(os.path.join(out_dir, 'luna16_3d_generalization_roc.png'), dpi=300)
         plt.close()
-        print(f"\n✅ 3D 模型 LUNA16 泛化 ROC 曲线已生成！")
+        print(f"\n✅ LUNA16 generalization ROC curve for 3D models generated!")
 
-    # 绘制 2D 组
+    # Plot the 2D group
     if len(results_2d) > 0:
         plt.figure(figsize=(7, 6))
         colors_2d = {'ResNet2D': 'darkorange', 'DenseNet2D': 'purple'}
@@ -172,6 +172,6 @@ if __name__ == "__main__":
         plt.legend(loc="lower right"); plt.grid(alpha=0.3); plt.tight_layout()
         plt.savefig(os.path.join(out_dir, 'luna16_2d_generalization_roc.png'), dpi=300)
         plt.close()
-        print(f"✅ 2D 模型 LUNA16 泛化 ROC 曲线已生成！")
+        print(f"✅ LUNA16 generalization ROC curve for 2D models generated!")
         
-    print(f"\n🎉 恭喜！所有测试图表已完整保存至: {out_dir}")
+    print(f"\n🎉 All test plots have been saved to: {out_dir}")

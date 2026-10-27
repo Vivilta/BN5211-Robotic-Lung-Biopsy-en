@@ -29,7 +29,7 @@ def plot_rib_box(ax, min_pt, max_pt, color='#4A90E2', alpha=0.30):
     ax.add_collection3d(poly)
 
 def main():
-    print("🎬 正在启动动态手术穿刺仿真生成器...")
+    print("🎬 Starting the dynamic surgical puncture animation generator...")
     
     traj_path = r"F:\Lung-Nodule\data\demo_nodules\planned_trajectory_0037.json"
     kin_path = r"F:\Lung-Nodule\data\demo_nodules\kinematics_result_0037.json"
@@ -51,7 +51,7 @@ def main():
     ax = fig.add_subplot(111, projection='3d')
     plt.subplots_adjust(left=0.01, right=0.99, top=0.90, bottom=0.04)
 
-    # 1. 静态背景：后胸骨骼
+    # 1. Static background: posterior chest-wall ribs.
     mid_puncture = (entry_pt + target_pt) / 2.0
     dists = [np.linalg.norm((np.array(o["min_mm"]) + np.array(o["max_mm"]))/2.0 - mid_puncture) for o in obstacles]
     sort_idx = np.argsort(dists)
@@ -62,18 +62,18 @@ def main():
         dims = np.clip(np.abs(b_max - b_min), 15.0, 50.0)
         plot_rib_box(ax, c - dims/2.0, c + dims/2.0, color='#4A90E2', alpha=0.22)
 
-    # 2. 静态背景：前胸肋间隙肋骨
+    # 2. Static background: anterior ribs around the intercostal space.
     rib_w, rib_t, rib_h = 36.0, 14.0, 16.0
     sup_min = np.array([entry_pt[0] - rib_w/2, entry_pt[1] - 6.0, entry_pt[2] + 15.0])
     plot_rib_box(ax, sup_min, sup_min + np.array([rib_w, rib_t, rib_h]), color='#3182CE', alpha=0.38)
     inf_min = np.array([entry_pt[0] - rib_w/2, entry_pt[1] - 6.0, entry_pt[2] - 15.0 - rib_h])
     plot_rib_box(ax, inf_min, inf_min + np.array([rib_w, rib_t, rib_h]), color='#3182CE', alpha=0.38)
 
-    # 3. 静态目标点与入针点
+    # 3. Static target and entry points.
     ax.scatter(target_pt[0], target_pt[1], target_pt[2], color='#E53E3E', s=240, edgecolors='black', label='Malignant Nodule (Target)', depthshade=False)
     ax.scatter(entry_pt[0], entry_pt[1], entry_pt[2], color='#0072BD', s=190, marker='^', edgecolors='black', label='Skin Entry Point', depthshade=False)
 
-    # 4. 计算机械臂基准骨架
+    # 4. Calculate the manipulator's reference skeleton.
     T_local = np.eye(4)
     local_pts = [T_local[:3, 3].copy()]
     for i in range(6):
@@ -84,13 +84,13 @@ def main():
     offset = entry_pt - local_pts[-1]
     static_robot_pts = local_pts + offset
 
-    # 动态线元初始化
+    # Initialize dynamic line elements.
     needle_line, = ax.plot([], [], [], color='#00E676', linewidth=5.0, label='Needle Trajectory (Advancing)')
     robot_line, = ax.plot([], [], [], color='#ED8936', linewidth=4.5, marker='o', markersize=7, 
                           markerfacecolor='#1A365D', markeredgecolor='white', label='UR5 Manipulator')
     status_text = ax.text2D(0.02, 0.78, "", transform=ax.transAxes, fontsize=11, fontweight='bold', color='#D9381E')
 
-    # 视场设定
+    # Set the field of view.
     ax.set_xlim([150, 460])
     ax.set_ylim([-50, 320])
     ax.set_zlim([-260, 50])
@@ -102,20 +102,20 @@ def main():
     ax.legend(loc='upper left', bbox_to_anchor=(0.02, 0.98), frameon=True, facecolor='white', framealpha=0.92, fontsize=9)
     ax.view_init(elev=20, azim=46)
 
-    # 仿真步数
+    # Number of animation frames.
     total_frames = 60
     
     def update(frame):
-        # 刺入进度 alpha 从 0.0 (入针点) 到 1.0 (结节靶点)
+        # Insertion progress alpha ranges from 0.0 (entry point) to 1.0 (nodule target).
         progress = frame / float(total_frames)
         current_tip = entry_pt + progress * (target_pt - entry_pt)
         depth = progress * np.linalg.norm(target_pt - entry_pt)
 
-        # 更新针身轨迹
+        # Update the needle trajectory.
         needle_line.set_data([entry_pt[0], current_tip[0]], [entry_pt[1], current_tip[1]])
         needle_line.set_3d_properties([entry_pt[2], current_tip[2]])
 
-        # 机械臂跟随末端夹持器同步向前进给
+        # Advance the manipulator illustration with the needle holder.
         current_robot_pts = static_robot_pts + (current_tip - entry_pt)
         robot_line.set_data(current_robot_pts[:, 0], current_robot_pts[:, 1])
         robot_line.set_3d_properties(current_robot_pts[:, 2])
@@ -123,16 +123,16 @@ def main():
         status_text.set_text(f"Illustration only\nInsertion visualization: {progress*100:.1f}%\nNo joint-level simulation or collision validation")
         return needle_line, robot_line, status_text
 
-    print(">> 正在渲染动态仿真动画并导出 GIF (请稍候几秒)...")
+    print(">> Rendering the animation and exporting a GIF. Please wait...")
     anim = FuncAnimation(fig, update, frames=total_frames, interval=50, blit=False)
     
-    # 导出 GIF 动画
+    # Export the GIF animation.
     out_gif = r"F:\Lung-Nodule\data\demo_nodules\dynamic_biopsy_simulation.gif"
     try:
         anim.save(out_gif, writer='pillow', fps=20)
-        print(f"🎉 动态手术 GIF 已成功生成: {out_gif}")
+        print(f"🎉 Dynamic surgery GIF generated: {out_gif}")
     except Exception as e:
-        print(f"⚠️ GIF 保存提示: {e}")
+        print(f"⚠️ GIF save warning: {e}")
 
     plt.show()
 

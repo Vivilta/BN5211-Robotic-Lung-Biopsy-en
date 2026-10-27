@@ -5,19 +5,19 @@ from torch.utils.data import DataLoader, random_split
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
-# 导入 2D 横截面数据集
+# Import the 2D cross-sectional dataset
 from dataset_2D import LungNodule2DDataset
 from train_2D import Transform2D
 
 # ==============================================================
-# 🧠 1. 自定义 2D CBAM 注意力机制 (通道注意力 + 空间注意力)
+# 🧠 1. Custom 2D CBAM attention mechanism (channel attention + spatial attention)
 # ==============================================================
 
-# 1.1 通道注意力模块 (Channel Attention 2D)
+# 1.1 Channel attention module (Channel Attention 2D)
 class ChannelAttention2D(nn.Module):
     def __init__(self, in_planes, ratio=16):
         super(ChannelAttention2D, self).__init__()
-        # 使用 2D 池化
+        # Use 2D pooling
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.max_pool = nn.AdaptiveMaxPool2d(1)
            
@@ -34,13 +34,13 @@ class ChannelAttention2D(nn.Module):
         out = avg_out + max_out
         return self.sigmoid(out)
 
-# 1.2 空间注意力模块 (Spatial Attention 2D)
+# 1.2 Spatial attention module (Spatial Attention 2D)
 class SpatialAttention2D(nn.Module):
     def __init__(self, kernel_size=7):
         super(SpatialAttention2D, self).__init__()
         assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
         padding = 3 if kernel_size == 7 else 1
-        # 输入通道为 2（Avg + Max 拼接），输出通道为 1
+        # Input has 2 channels (concatenated average + max); output has 1 channel
         self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
         self.sigmoid = nn.Sigmoid()
 
@@ -51,7 +51,7 @@ class SpatialAttention2D(nn.Module):
         x = self.conv1(x)
         return self.sigmoid(x)
 
-# 1.3 完整的 2D CBAM 模块
+# 1.3 Complete 2D CBAM module
 class CBAM2D(nn.Module):
     def __init__(self, in_planes, ratio=16, kernel_size=7):
         super(CBAM2D, self).__init__()
@@ -64,12 +64,12 @@ class CBAM2D(nn.Module):
         return out
 
 # ==============================================================
-# 🏗️ 2. 构建带 CBAM 注意力机制的 2D 定制 ResNet
+# 🏗️ 2. Build a custom 2D ResNet with CBAM attention
 # ==============================================================
 class AttentionResNet2D(nn.Module):
     def __init__(self, num_classes=2):
         super(AttentionResNet2D, self).__init__()
-        # 对齐 3D 版本的网络深度，保证绝对的控制变量比较
+        # Match the network depth of the 3D version to keep the comparison controlled
         self.stem = nn.Sequential(
             nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(16),
@@ -80,14 +80,14 @@ class AttentionResNet2D(nn.Module):
             nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
-            CBAM2D(in_planes=32) # 注入强力 2D CBAM
+            CBAM2D(in_planes=32) # Inject the 2D CBAM module
         )
         
         self.layer2 = nn.Sequential(
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            CBAM2D(in_planes=64) # 注入强力 2D CBAM
+            CBAM2D(in_planes=64) # Inject the 2D CBAM module
         )
         
         self.avgpool = nn.AdaptiveAvgPool2d(1)
@@ -103,7 +103,7 @@ class AttentionResNet2D(nn.Module):
         return x
 
 # ==============================================================
-# ⚡ 3. PyTorch Lightning 训练封装
+# ⚡ 3. PyTorch Lightning training wrapper
 # ==============================================================
 class LitAttentionModel2D(pl.LightningModule):
     def __init__(self, learning_rate=1e-3):
@@ -147,7 +147,7 @@ if __name__ == "__main__":
     MANIFEST_PATH = "data/processed/final_dataset_manifest.csv"
     CUBE_DIR = "data/processed/all_roi_cubes/"
     
-    # 强制固定随机种子，对齐划分
+    # Fix the random seed to align the data split
     torch.manual_seed(42)
     
     full_dataset = LungNodule2DDataset(manifest_path=MANIFEST_PATH, cube_dir=CUBE_DIR, transform=Transform2D())
@@ -167,7 +167,7 @@ if __name__ == "__main__":
         save_top_k=1, monitor='val_acc', mode='max'
     )
     
-    # 修改日志名称
+    # Update the log name
     logger = TensorBoardLogger("models/logs/", name="advanced_2d_resnet_cbam")
     
     trainer = pl.Trainer(
@@ -175,5 +175,5 @@ if __name__ == "__main__":
         callbacks=[early_stop_callback, checkpoint_callback]
     )
     
-    print("🚀 正在训练【注入 2D CBAM 注意力机制】的高级网络...")
+    print("🚀 Training the advanced network with 2D CBAM attention...")
     trainer.fit(lit_model, train_loader, val_loader)

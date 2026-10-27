@@ -12,16 +12,15 @@ from scipy import ndimage
 
 class VirtualChestEnvironment:
     """
-    虚拟胸腔几何建模器：
-    从 3D CT 中提取体表皮肤曲面与肋骨骨骼障碍物（Bounding Boxes）
+    Virtual chest geometry model that extracts the skin surface and rib
+    obstacles (bounding boxes) from a 3D CT scan.
     """
     def __init__(self, ct_path):
         """
-        自适应加载患者 CT：
-        - 如果是文件夹，自动读取里面的 DICOM 序列 (.dcm)
-        - 如果是文件，直接读取 (.mhd / .nii)
+        Load a patient CT scan from either a directory containing a DICOM
+        series (.dcm) or a supported image file (.mhd / .nii).
         """
-        print(f"正在加载 CT 影像，请稍候: {ct_path}")
+        print(f"Loading CT image, please wait: {ct_path}")
         self.series_instance_uid = None
         self._index_to_physical = None
         if os.path.isdir(ct_path):
@@ -59,7 +58,7 @@ class VirtualChestEnvironment:
             self.origin = np.array(self.ct_image.GetOrigin())
             self.direction = np.array(self.ct_image.GetDirection()).reshape(3, 3)
             self.ct_array = sitk.GetArrayFromImage(self.ct_image)
-        print(f"CT 加载完成，原图形状 [Z, Y, X]: {self.ct_array.shape}")
+        print(f"CT loaded. Original array shape [Z, Y, X]: {self.ct_array.shape}")
 
     def _load_dicom_with_pydicom(self, series_dir):
         files = sorted(Path(series_dir).glob("*.dcm"))
@@ -110,7 +109,7 @@ class VirtualChestEnvironment:
 
     def voxel_to_world(self, voxel_coord):
         """
-        体素坐标 (x_idx, y_idx, z_idx) 转换为绝对物理坐标 (X_mm, Y_mm, Z_mm)
+        Convert voxel coordinates (x_idx, y_idx, z_idx) to physical coordinates (X_mm, Y_mm, Z_mm).
         """
         if self._index_to_physical is not None:
             index = np.append(np.asarray(voxel_coord, dtype=float), 1.0)
@@ -122,7 +121,7 @@ class VirtualChestEnvironment:
 
     def world_to_voxel(self, world_coord):
         """
-        绝对物理坐标 (X_mm, Y_mm, Z_mm) 转换为体素索引 (x_idx, y_idx, z_idx)
+        Convert physical coordinates (X_mm, Y_mm, Z_mm) to voxel indices (x_idx, y_idx, z_idx).
         """
         if self._index_to_physical is not None:
             physical = np.append(np.asarray(world_coord, dtype=float), 1.0)
@@ -131,15 +130,15 @@ class VirtualChestEnvironment:
 
     def extract_skin_surface(self, skin_hu_threshold=-200):
         """
-        提取胸壁皮肤表面：
-        通过阈值分割识别整个人体区域，提取最外层边界轮廓点
+        Extract the chest-wall skin surface by thresholding the body region
+        and identifying its outer boundary.
         """
-        print(f"正在提取体表皮肤掩膜 (HU > {skin_hu_threshold})...")
-        # 二值化：将体表组织与空气背景分离
+        print(f"Extracting the body-surface mask (HU > {skin_hu_threshold})...")
+        # Binarize to separate body tissue from the air background.
         body_mask = (self.ct_array > skin_hu_threshold).astype(np.uint8)
         
-        # 填充体腔内部空洞，得到实心人体 mask
-        # 针对每个 2D slice 进行二值填充
+        # Fill internal body cavities to obtain a solid body mask.
+        # Apply binary hole filling to each 2D slice.
         for z in range(body_mask.shape[0]):
             body_mask[z] = ndimage.binary_fill_holes(body_mask[z])
             
@@ -147,32 +146,33 @@ class VirtualChestEnvironment:
 
     def extract_rib_bounding_boxes(self, bone_hu_threshold=300, min_volume_voxels=300):
         """
-        提取肋骨障碍物三维边界框 (Bounding Boxes):
-        通过骨骼 HU 阈值分割提取高密度肋骨，按连通域划分，输出三维轴对齐包围盒 (AABB)
+        Extract 3D rib obstacle bounding boxes by thresholding high-density
+        bone and grouping it by connected component. Output axis-aligned
+        bounding boxes (AABBs).
         """
-        print(f"正在提取骨骼掩膜并计算连通域包围盒 (HU > {bone_hu_threshold})...")
+        print(f"Extracting the bone mask and computing connected-component boxes (HU > {bone_hu_threshold})...")
         bone_mask = self.ct_array > bone_hu_threshold
         
-        # 连通域标记 (3D Connected Component Labeling)
+        # Label 3D connected components.
         labeled_bones, num_features = ndimage.label(bone_mask)
         
         rib_boxes = []
-        # 获取各连通域的切片边界
+        # Get the slice bounds for each connected component.
         objects = ndimage.find_objects(labeled_bones)
         
         for idx, loc in enumerate(objects):
             if loc is None:
                 continue
             
-            # 计算该连通域的体素体积，过滤噪声微小骨片
+            # Calculate the component volume and filter small noisy bone fragments.
             voxel_count = np.sum(labeled_bones[loc] == (idx + 1))
             if voxel_count < min_volume_voxels:
                 continue
             
             z_slice, y_slice, x_slice = loc
             
-            # 体素边界 [min, max]
-            # SimpleITK 的坐标转换接受的是 [X, Y, Z] 顺序的索引
+            # Voxel bounds [min, max].
+            # SimpleITK coordinate transforms expect indices in [X, Y, Z] order.
             min_voxel = (x_slice.start, y_slice.start, z_slice.start)
             max_voxel = (x_slice.stop - 1, y_slice.stop - 1, z_slice.stop - 1)
             
@@ -187,7 +187,7 @@ class VirtualChestEnvironment:
             min_world = corners.min(axis=0)
             max_world = corners.max(axis=0)
             
-            # 轴对齐三维包围盒 (AABB): [min_x, min_y, min_z, max_x, max_y, max_z]
+            # Axis-aligned 3D bounding box (AABB): [min_x, min_y, min_z, max_x, max_y, max_z].
             box_world = {
                 "id": f"rib_cluster_{idx+1}",
                 "min_mm": np.minimum(min_world, max_world).tolist(),
@@ -198,7 +198,7 @@ class VirtualChestEnvironment:
             }
             rib_boxes.append(box_world)
             
-        print(f"✅ 成功提取到 {len(rib_boxes)} 个主要骨骼/肋骨障碍物包围盒。")
+        print(f"✅ Extracted {len(rib_boxes)} major bone/rib obstacle bounding boxes.")
         return rib_boxes
 
     def _voxel_bounds_to_world(self, min_voxel, max_voxel):
@@ -328,7 +328,7 @@ class VirtualChestEnvironment:
 
         boxes.sort(key=lambda item: (item["min_voxel"][2], item["min_voxel"][1], item["min_voxel"][0]))
         print(
-            f"✅ 局部肋骨候选提取完成: {len(boxes)} 个分段障碍盒; "
+            f"✅ Local rib candidate extraction complete: {len(boxes)} segmented obstacle boxes; "
             f"crop Z/Y/X=[{z0}:{z1}, {y0}:{y1}, {x0}:{x1}], "
             f"components={num_features}"
         )
@@ -384,7 +384,7 @@ class VirtualChestEnvironment:
         print(f"Saved local extraction preview to: {output_path.resolve()}")
 
 # ==========================================
-# 本地测试与 JSON 导出
+# Local testing and JSON export.
 # ==========================================
 def _parse_args():
     parser = argparse.ArgumentParser(description="Extract CT-space bone AABBs from one DICOM series.")

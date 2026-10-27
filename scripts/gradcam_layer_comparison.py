@@ -84,7 +84,7 @@ class GradCAM3D:
         raw_max = float(cam.max())
         raw_mean = float(cam.mean())
 
-        # 只用于每张热力图内部的可视化归一化
+        # Used only for visualization normalization within each heatmap
         cam_min = float(cam.min())
         cam_max = float(cam.max())
 
@@ -248,7 +248,7 @@ def main():
         print(f"\nCase: {file.name}")
         print(f"Class 1 probability: {probability:.2%}")
 
-        # 每次只注册一个目标层，避免 Hook 相互影响
+        # Register only one target layer at a time to prevent hooks from interfering
         for name, layer in target_layers.items():
             gradcam = GradCAM3D(model, layer)
 

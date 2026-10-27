@@ -6,20 +6,21 @@ import numpy as np
 from pathlib import Path
 
 # ==========================================
-# 🛠️ 基础配置加载模块
+# 🛠️ Configuration loading
 # ==========================================
 def load_config(config_path: str = "config/config.yaml") -> dict:
-    """加载全局路径配置文件 yaml"""
+    """Load the global YAML path configuration."""
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 # ==========================================
-# 🧬 核心特征提取：解析单名医生的原始空间标注与评分
+# 🧬 Core feature extraction: parse each reader's spatial annotations and scores.
 # ==========================================
 def parse_xml_all_annotations(xml_path: str, patient_id: str) -> list:
     """
-    解析单个 XML 文件，提取医生打分、三维空间中心坐标、形态学特征（球形度、直径）。
-    为后续的三维物理空间聚类（合并同源结节）提供核心坐标弹药。
+    Parse one XML file to extract reader scores, 3D center coordinates,
+    and morphological features such as sphericity and diameter. These
+    coordinates support later clustering of annotations for the same nodule.
     """
     try:
         tree = ET.parse(xml_path)
@@ -31,9 +32,9 @@ def parse_xml_all_annotations(xml_path: str, patient_id: str) -> list:
     for session in root.iter():
         if session.tag.endswith('readingSession'):
             for nodule in session.iter():
-                # 过滤出直径 >= 3mm 的明确结节标注
+                # Keep explicit nodule annotations with a diameter >= 3 mm.
                 if nodule.tag.endswith('unblindedReadNodule'):
-                    nodule_id = "未知"
+                    nodule_id = "Unknown"
                     malignancy = np.nan   
                     sphericity = np.nan   
                     z_position = np.nan   
@@ -62,7 +63,7 @@ def parse_xml_all_annotations(xml_path: str, patient_id: str) -> list:
                         
                         width = max(x_coords) - min(x_coords)
                         height = max(y_coords) - min(y_coords)
-                        # LIDC 的平均像素间距大约是 0.7mm
+                        # The average LIDC pixel spacing is approximately 0.7 mm.
                         diameter = max(width, height) * 0.7
                         
                         annotations.append({
@@ -78,12 +79,12 @@ def parse_xml_all_annotations(xml_path: str, patient_id: str) -> list:
     return annotations
 
 # ==========================================
-# 🎯 空间物理聚类：无视名字，只认物理坐标的同源合并
+# 🎯 Physical-space clustering: merge annotations by location, not by name.
 # ==========================================
 def cluster_patient_nodules(annotations: list, distance_threshold: float = 5.0) -> list:
     """
-    计算不同医生圈出结节的三维空间欧氏距离。
-    如果中心点物理距离 <= 5.0 毫米，则判定它们是同一个物理结节。
+    Calculate the 3D Euclidean distance between nodule centers marked by
+    different readers. Centers within 5.0 mm are treated as the same nodule.
     """
     clusters = [] 
     for ann in annotations:
@@ -132,7 +133,7 @@ def cluster_patient_nodules(annotations: list, distance_threshold: float = 5.0) 
     return golden_nodules
 
 # ==========================================
-# 🚀 主程序业务流
+# 🚀 Main workflow
 # ==========================================
 if __name__ == "__main__":
     cfg = load_config()
@@ -143,30 +144,30 @@ if __name__ == "__main__":
 
     print("==================================================")
     
-    # 1. 提取患者人口学特征 (年龄、性别)
+    # 1. Extract patient demographics (age and sex).
     patient_dict = {}
-    print("-> 正在扫描 DICOM 头部字典获取年龄与性别...")
+    print("-> Scanning DICOM headers for age and sex...")
     for patient_folder in lidc_root.glob("LIDC-IDRI-*"):
         patient_id = patient_folder.name
         dcm_files = list(patient_folder.rglob("*.dcm"))
         if dcm_files:
             try:
                 ds = pydicom.dcmread(dcm_files[0], stop_before_pixels=True)
-                age = getattr(ds, 'PatientAge', '未知')
-                sex = getattr(ds, 'PatientSex', '未知')
-                if age != '未知' and isinstance(age, str) and age.endswith('Y'):
+                age = getattr(ds, 'PatientAge', 'Unknown')
+                sex = getattr(ds, 'PatientSex', 'Unknown')
+                if age != 'Unknown' and isinstance(age, str) and age.endswith('Y'):
                     age = int(age.replace('Y', '').replace('0', '', 1) if age.startswith('0') else age.replace('Y', ''))
                 patient_dict[patient_id] = {'age': age, 'sex': sex}
             except Exception:
-                patient_dict[patient_id] = {'age': '未知', 'sex': '未知'}
+                patient_dict[patient_id] = {'age': 'Unknown', 'sex': 'Unknown'}
 
-    # 2. 地毯式读取全数据集的 XML 空间轮廓
+    # 2. Read spatial annotations from all XML files in the dataset.
     all_xml_files = list(lidc_root.rglob("*.xml"))
     all_patient_annotations = {}
     
-    print(f"-> 正在解构 {len(all_xml_files)} 份 XML 空间标注并提取...")
+    print(f"-> Parsing spatial annotations from {len(all_xml_files)} XML files...")
     for xml_path in all_xml_files:
-        patient_id = "未知"
+        patient_id = "Unknown"
         for part in xml_path.parts:
             if "LIDC-IDRI-" in part:
                 patient_id = part
@@ -176,8 +177,8 @@ if __name__ == "__main__":
             all_patient_annotations[patient_id] = []
         all_patient_annotations[patient_id].extend(anns)
         
-    # 3. 执行同病人体内的 3D 物理空间聚类
-    print("-> 正在执行 3D 物理空间结节聚类 (强制合并同源病灶)...")
+    # 3. Cluster nodule annotations in 3D physical space within each patient.
+    print("-> Clustering nodules in 3D physical space (merging annotations of the same lesion)...")
     all_clustered_nodules = []
     for pid, anns in all_patient_annotations.items():
         if anns:
@@ -186,40 +187,40 @@ if __name__ == "__main__":
             
     df_clustered = pd.DataFrame(all_clustered_nodules)
     
-    # 4. 临床特征大回填，固化交付主数据探索表
-    print("-> 正在组装全维度大账本...")
-    df_clustered['patient_age'] = df_clustered['patient_id'].map(lambda x: patient_dict.get(x, {'age': '未知'})['age'])
-    df_clustered['patient_sex'] = df_clustered['patient_id'].map(lambda x: patient_dict.get(x, {'sex': '未知'})['sex'])
+    # 4. Add clinical features and create the master data exploration table.
+    print("-> Assembling the complete manifest...")
+    df_clustered['patient_age'] = df_clustered['patient_id'].map(lambda x: patient_dict.get(x, {'age': 'Unknown'})['age'])
+    df_clustered['patient_sex'] = df_clustered['patient_id'].map(lambda x: patient_dict.get(x, {'sex': 'Unknown'})['sex'])
     
-    # 规范大账本的列排布顺序 (确保包含了 nodule_id 供下一步切图定位)
+    # Set the manifest column order, retaining nodule_id for ROI extraction.
     master_cols = ['patient_id', 'nodule_id', 'patient_age', 'patient_sex', 'diameter', 'nodule_sphericity', 'pos_x', 'pos_y', 'pos_z', 'reader_count', 'mean_malignancy']
     df_master = df_clustered[master_cols].copy()
     
-    # 💡 数据字典说明 (供查阅参考，实际导出为英文表头)
-    # 'patient_id': '患者编号'
-    # 'patient_age': '患者年龄'
-    # 'patient_sex': '患者性别'
-    # 'diameter': '物理直径(毫米)'
-    # 'nodule_sphericity': '平均球形度(1-5)'
-    # 'pos_x': 'X轴空间坐标'
-    # 'pos_y': 'Y轴空间坐标'
-    # 'pos_z': 'Z轴绝对高度'
-    # 'reader_count': '医生一致认可数'
-    # 'mean_malignancy': '平均恶性评分(1-5)'
-    # 'label': '终极黄金标签(0良/1恶)'
+    # 💡 Data dictionary (exported column names are already in English).
+    # 'patient_id': patient identifier
+    # 'patient_age': patient age
+    # 'patient_sex': patient sex
+    # 'diameter': physical diameter (mm)
+    # 'nodule_sphericity': mean sphericity score (1-5)
+    # 'pos_x': spatial X coordinate
+    # 'pos_y': spatial Y coordinate
+    # 'pos_z': absolute Z coordinate
+    # 'reader_count': number of agreeing readers
+    # 'mean_malignancy': mean malignancy score (1-5)
+    # 'label': final reference label (0 benign / 1 malignant)
     
     master_path = output_dir / "master_data_exploration.csv"
     df_master.to_csv(master_path, index=False, encoding="utf-8-sig")
-    print(f"✅ 结果已保存至: {master_path}")
+    print(f"✅ Results saved to: {master_path}")
     
-    # 5. 应用双层网筛选，生成最终用于模型切图的黄金标签表
-    print("\n-> 正在应用核心过滤网：[医生数 >= 3] & [直径 >= 3.0mm] ...")
+    # 5. Apply the reader-count and diameter filters to create final ROI labels.
+    print("\n-> Applying filters: reader count >= 3 and diameter >= 3.0 mm...")
     df_filtered = df_master[(df_master['reader_count'] >= 3) & (df_master['diameter'] >= 3.0)].copy()
     
     def assign_binary_label(score):
-        if score > 3.0: return 1   # 恶性
-        elif score < 3.0: return 0 # 良性
-        else: return -1            # 刚好 3 分属于模糊争议边界，执行安全剔除
+        if score > 3.0: return 1   # Malignant
+        elif score < 3.0: return 0 # Benign
+        else: return -1            # A score of exactly 3 is indeterminate and is excluded.
         
     df_filtered['label'] = df_filtered['mean_malignancy'].apply(assign_binary_label)
     df_final = df_filtered[df_filtered['label'] != -1].copy()
@@ -229,8 +230,8 @@ if __name__ == "__main__":
     
 
     print("==================================================")
-    print(f"-> 严格符合所有硬性指标的高质量结节数: {len(df_final)} 个")
-    print(f"   - 黄金良性结节 (Label 0): {(df_final['label'] == 0).sum()} 个")
-    print(f"   - 黄金恶性结节 (Label 1): {(df_final['label'] == 1).sum()} 个")
-    print(f"✅ 结果已保存至: {final_label_path}")
+    print(f"-> High-quality nodules meeting all criteria: {len(df_final)}")
+    print(f"   - Reference benign nodules (Label 0): {(df_final['label'] == 0).sum()}")
+    print(f"   - Reference malignant nodules (Label 1): {(df_final['label'] == 1).sum()}")
+    print(f"✅ Results saved to: {final_label_path}")
     print("==================================================")

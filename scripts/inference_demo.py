@@ -7,14 +7,14 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-# 项目根目录
+# Project root directory
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from train_3D_attention import LitAttentionModel
 from train_3D import LitLungNoduleModel
 
-# 文件路径
+# File paths
 DATA_DIR = ROOT / "data" / "demo_nodules"
 CKPT_DIR = ROOT / "models" / "checkpoints_attention"
 OUTPUT_DIR = ROOT / "ppt_results" / "inference"
@@ -116,7 +116,7 @@ def main():
         writer.writeheader()
         writer.writerows(results)
 
-    # 绘制模型对比图
+    # Plot model comparison
     case_names = [f.stem for f in files]
     x = np.arange(len(case_names))
     width = 0.35

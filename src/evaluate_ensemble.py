@@ -5,7 +5,7 @@ import numpy as np
 from sklearn.metrics import accuracy_score, roc_auc_score
 from torch.utils.data import DataLoader, random_split
 
-# 导入训练好的两个最强 3D 架构
+# Import the two strongest trained 3D architectures
 from dataset_3D import LungNodule3DDataset
 from train_3D_attention import LitAttentionModel
 from train_3D_vnet import LitLungNoduleVNet3D
@@ -17,24 +17,24 @@ def get_best_ckpt(ckpt_dir):
     return ckpts[-1]
 
 if __name__ == "__main__":
-    print("=== 🚀 [任务 7] 启动模型集成 (Model Ensemble) 联合评估 ===")
+    print("=== 🚀 [Task 7] Start combined model ensemble evaluation ===")
     
-    # 1. 寻找最优权重
+    # 1. Find the best checkpoints
     ckpt_attention = get_best_ckpt("models/checkpoints_attention/")
     ckpt_vnet = get_best_ckpt("models/checkpoints_3d_vnet/")
     
     if not ckpt_attention or not ckpt_vnet:
-        print("❌ 错误：请确保 models/ 目录下同时存在 Attention 和 VNet 的权重文件。")
+        print("❌ Error: Ensure that checkpoint files for both Attention and VNet exist in the models/ directory.")
         exit(1)
         
-    print(f"📦 发现 Attention 模型权重: {os.path.basename(ckpt_attention)}")
-    print(f"📦 发现 VNet 模型权重: {os.path.basename(ckpt_vnet)}")
+    print(f"📦 Found Attention model checkpoint: {os.path.basename(ckpt_attention)}")
+    print(f"📦 Found VNet model checkpoint: {os.path.basename(ckpt_vnet)}")
 
-    # 2. 加载模型
+    # 2. Load the models
     model_a = LitAttentionModel.load_from_checkpoint(ckpt_attention).eval()
     model_b = LitLungNoduleVNet3D.load_from_checkpoint(ckpt_vnet).eval()
 
-    # 3. 准备验证集 (保持相同的 Seed=42 以对齐之前的评估)
+    # 3. Prepare the validation set (use Seed=42 to match previous evaluations)
     MANIFEST_PATH = "data/processed/final_dataset_manifest.csv"
     CUBE_DIR = "data/processed/all_roi_cubes/"
     torch.manual_seed(42)
@@ -43,17 +43,17 @@ if __name__ == "__main__":
     _, val_dataset = random_split(full_dataset, [train_size, len(full_dataset) - train_size])
     val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=0)
 
-    # 4. 收集双模型的预测概率
+    # 4. Collect prediction probabilities from both models
     probs_a, probs_b, labels = [], [], []
     
-    print("⏳ 正在执行双路模型并发推理...")
+    print("⏳ Running inference with both models...")
     with torch.no_grad():
         for x, y in val_loader:
-            # 模型 A 推理 (3D Attention ResNet)
+            # Inference with model A (3D Attention ResNet)
             logits_a = model_a(x)
             prob_a = torch.softmax(logits_a, dim=1)[:, 1].cpu().numpy()
             
-            # 模型 B 推理 (3D VNet)
+            # Inference with model B (3D VNet)
             logits_b = model_b(x)
             prob_b = torch.softmax(logits_b, dim=1)[:, 1].cpu().numpy()
             
@@ -66,22 +66,22 @@ if __name__ == "__main__":
     labels = np.array(labels)
 
     # ==============================================================
-    # 🧠 核心集成算法：加权软投票 (Soft Voting)
-    # 根据之前的独立评估表现，给予更强的 Attention 模型更高的权重
+    # 🧠 Core ensemble algorithm: weighted soft voting
+    # Assign a higher weight to the Attention model based on its stronger independent evaluation performance
     # ==============================================================
-    weight_a = 0.6  # 3D Attention 权重
-    weight_b = 0.4  # 3D VNet 权重
+    weight_a = 0.6  # 3D Attention weight
+    weight_b = 0.4  # 3D VNet weight
     probs_ensemble = (probs_a * weight_a) + (probs_b * weight_b)
     preds_ensemble = (probs_ensemble > 0.5).astype(int)
 
-    # 计算各路指标
+    # Calculate metrics for each model
     auc_a = roc_auc_score(labels, probs_a)
     auc_b = roc_auc_score(labels, probs_b)
     auc_ens = roc_auc_score(labels, probs_ensemble)
     acc_ens = accuracy_score(labels, preds_ensemble)
 
-    print("\n📊 === 集成效果对比 (Ensemble Performance) ===")
-    print(f"🔸 单模型 A (3D Attention) AUC : {auc_a:.4f}")
-    print(f"🔸 单模型 B (3D VNet)      AUC : {auc_b:.4f}")
-    print(f"🌟 融合集成模型 (Ensemble)  AUC : {auc_ens:.4f}  <-- 性能提升！")
-    print(f"🌟 融合集成模型 (Ensemble)  Acc : {acc_ens:.4f}")
+    print("\n📊 === Ensemble Performance Comparison ===")
+    print(f"🔸 Model A (3D Attention) AUC : {auc_a:.4f}")
+    print(f"🔸 Model B (3D VNet) AUC : {auc_b:.4f}")
+    print(f"🌟 Ensemble Model AUC : {auc_ens:.4f}  <-- Improved performance!")
+    print(f"🌟 Ensemble Model Accuracy : {acc_ens:.4f}")

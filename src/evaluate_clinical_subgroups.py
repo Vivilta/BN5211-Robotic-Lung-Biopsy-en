@@ -15,9 +15,9 @@ from train_3D_attention import LitAttentionModel
 def load_best_model(ckpt_dir):
     ckpts = glob.glob(os.path.join(ckpt_dir, "*.ckpt"))
     if not ckpts:
-        raise FileNotFoundError(f"❌ 找不到有效的权重文件: {ckpt_dir}")
+        raise FileNotFoundError(f"❌ No valid checkpoint found in: {ckpt_dir}")
     ckpts.sort(key=os.path.getmtime)
-    print(f"📦 正在加载最优 3D 权重进行临床分析: {os.path.basename(ckpts[-1])}")
+    print(f"📦 Loading the best 3D checkpoint for clinical analysis: {os.path.basename(ckpts[-1])}")
     return LitAttentionModel.load_from_checkpoint(ckpts[-1])
 
 if __name__ == "__main__":
@@ -45,7 +45,7 @@ if __name__ == "__main__":
     all_probs = []
     all_preds = []
     
-    print("⏳ 开始对临床验证集执行批量前向推理...")
+    print("⏳ Running batch inference on the clinical validation set...")
     with torch.no_grad():
         for x, y in val_loader:
             logits = model(x)
@@ -56,52 +56,59 @@ if __name__ == "__main__":
             
     val_df['pred_prob'] = all_probs
     val_df['pred_label'] = all_preds
-    val_df['true_label'] = val_df['binary_desc'].apply(lambda x: 0 if '良性' in str(x) else 1)
+    if 'binary_label' in val_df.columns:
+        numeric_labels = pd.to_numeric(val_df['binary_label'], errors='coerce').fillna(1)
+        val_df['true_label'] = (numeric_labels != 0).astype(int)
+    else:
+        val_df['true_label'] = val_df['binary_desc'].apply(
+            lambda x: 0 if 'benign' in str(x).lower() else 1
+        )
     
     # ==============================================================
-    # 💉 数据特征生成与补全 
+    # Generate and complete clinical and morphological features.
     # ==============================================================
-    print("\n💉 正在提取并补全临床与形态学特征...")
+    print("\n💉 Generating and completing clinical and morphological features...")
     np.random.seed(42) 
     
-    # [通用/形态] 1. 直径
+    # [General/morphology] 1. Diameter
     if 'diameter' not in val_df.columns:
         val_df['diameter'] = np.where(val_df['true_label'] == 1, 
                                       np.random.normal(14.5, 4.0, len(val_df)), 
                                       np.random.normal(6.5, 2.0, len(val_df)))
         val_df['diameter'] = np.clip(val_df['diameter'], 3.0, 30.0)
         
-    # [形态学] 2. 球形度 (形状)
+    # [Morphology] 2. Sphericity (shape)
     if 'nodule_sphericity' not in val_df.columns:
         val_df['nodule_sphericity'] = np.where(val_df['true_label'] == 1,
                                                np.random.randint(1, 4, len(val_df)),
                                                np.random.randint(3, 6, len(val_df)))
 
-    # [形态学] 3. 毛刺度 (边缘) 
+    # [Morphology] 3. Spiculation (margin)
     if 'spiculation' not in val_df.columns:
         val_df['spiculation'] = np.where(val_df['true_label'] == 1,
                                          np.random.randint(3, 6, len(val_df)),
                                          np.random.randint(1, 3, len(val_df)))
                                          
-    # [形态学] 4. 分叶度 (形状/边缘) 
+    # [Morphology] 4. Lobulation (shape/margin)
     if 'lobulation' not in val_df.columns:
         val_df['lobulation'] = np.where(val_df['true_label'] == 1,
                                         np.random.randint(3, 6, len(val_df)),
                                         np.random.randint(1, 4, len(val_df)))
 
-    # [形态学] 5. 钙化度 (内部结构) - 体现良性结节的强特征
+    # [Morphology] 5. Calcification (internal structure), a strong benign feature.
     if 'calcification' not in val_df.columns:
-        # 临床逻辑：良性结节更易出现明显钙化(高分)，恶性往往无或微小钙化(低分)
+        # Clinical assumption: benign nodules are more likely to show prominent calcification (high score),
+        # while malignant nodules often have absent or minimal calcification (low score).
         val_df['calcification'] = np.where(val_df['true_label'] == 1,
-                                           np.random.randint(1, 3, len(val_df)), # 恶性：1~2分
-                                           np.random.randint(3, 6, len(val_df))) # 良性：3~5分
+                                           np.random.randint(1, 3, len(val_df)), # Malignant: scores 1-2.
+                                           np.random.randint(3, 6, len(val_df))) # Benign: scores 3-5.
 
-    # [临床信息] 6. 三维物理坐标 (位置)
+    # [Clinical information] 6. 3D physical coordinates (location)
     for pos_col in ['pos_x', 'pos_y', 'pos_z']:
         if pos_col not in val_df.columns:
             val_df[pos_col] = np.random.uniform(-150, 150, len(val_df))
 
-    # [临床信息] 7. 年龄与性别
+    # [Clinical information] 7. Age and sex
     if 'patient_age' not in val_df.columns:
         val_df['patient_age'] = np.random.randint(30, 80, len(val_df))
     val_df['patient_age'] = pd.to_numeric(val_df['patient_age'], errors='coerce').fillna(55)
@@ -110,26 +117,27 @@ if __name__ == "__main__":
         val_df['patient_sex'] = np.random.choice(['Male', 'Female'], size=len(val_df))
     val_df['patient_sex'] = val_df['patient_sex'].apply(lambda x: 'Male' if str(x).upper().startswith('M') else 'Female')
 
-    # 🔥🔥🔥 微小结节惩罚机制 🔥🔥🔥
+    # 🔥🔥🔥 Penalty mechanism for tiny nodules 🔥🔥🔥
     mask_micro = val_df['diameter'] < 6.0
     num_micro = mask_micro.sum()
     
-    print(f"👉 侦测到 {num_micro} 个微小结节")
+    print(f"👉 Detected {num_micro} tiny nodules")
     
-    # 给微小结节加一个极大的随机波动，并且随机翻转一部分标签，摧毁其虚高的 AUC
+    # Add substantial random variation to tiny nodule predictions and flip some labels
+    # to reduce an artificially inflated AUC.
     if num_micro > 0:
         val_df.loc[mask_micro, 'pred_prob'] = np.clip(
-            np.random.uniform(0.3, 0.7, num_micro), # 让概率在 0.3~0.7 之间随机摇摆，不确定性极高
+            np.random.uniform(0.3, 0.7, num_micro), # Randomize probabilities from 0.3 to 0.7 to reflect high uncertainty.
             0.01, 0.99
         )
         val_df.loc[mask_micro, 'pred_label'] = (val_df.loc[mask_micro, 'pred_prob'] > 0.5).astype(int)
                                                                             
     # ==============================================================
-    # 📈 形态学特征(大小、形状、边缘)与模型预测的相关性分析
+    # 📈 Correlation analysis between morphology (size, shape, margin) and model predictions.
     # ==============================================================
-    print("\n📊 正在计算形态学特征与预测概率的 Spearman 相关系数...")
+    print("\n📊 Calculating Spearman correlations between morphological features and predicted probabilities...")
     
-    # 加入 calcification
+    # Include calcification.
     morphology_features = ['diameter', 'spiculation', 'lobulation', 'nodule_sphericity', 'calcification']
     if 'mean_score' in val_df.columns:
         morphology_features.append('mean_score') 
@@ -140,7 +148,7 @@ if __name__ == "__main__":
     for feat in morphology_features:
         coef, p_value = spearmanr(analysis_df[feat], analysis_df['pred_prob'])
         corr_results[feat] = {'Correlation_Coef': coef, 'P_Value': p_value}
-        print(f"   🔹 形态特征: {feat:20s} | 相关系数 R: {coef:6.3f} | P值: {p_value:.4e}")
+        print(f"   🔹 Morphology feature: {feat:20s} | Correlation R: {coef:6.3f} | P-value: {p_value:.4e}")
         
     plt.figure(figsize=(9, 7))
     sns.set_theme(style="white")
@@ -154,28 +162,28 @@ if __name__ == "__main__":
     corr_img_path = os.path.join(out_dir, "morphology_correlation_matrix.png")
     plt.savefig(corr_img_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"✅ 形态学相关性矩阵热力图 -> {corr_img_path}")
+    print(f"✅ Morphology correlation matrix heatmap -> {corr_img_path}")
 
     # ==============================================================
-    # 👥 基于临床信息的亚组性能评估 (大小、位置、年龄、性别)
+    # 👥 Subgroup performance evaluation by clinical information (size, location, age, sex).
     # ==============================================================
-    print("\n👥 正在构建临床多亚组（Subgroup）深度性能评估...")
+    print("\n👥 Building detailed clinical subgroup performance evaluation...")
     
-    # 1. 结节大小 (Size)
+    # 1. Nodule size
     val_df['subgroup_size'] = val_df['diameter'].apply(
         lambda d: '<5mm (Micro)' if float(d) < 5.0 else ('5-10mm (Small)' if float(d) <= 10.0 else '>10mm (Large)')
     )
 
-    # 2. 结节位置 (Location) - 利用 X 坐标区分左右肺
+    # 2. Nodule location - use the X coordinate to distinguish the left and right lungs.
     val_df['lung_side'] = val_df['pos_x'].apply(lambda x: 'Right Lung' if float(x) < 0 else 'Left Lung')
         
-    # 3. 患者年龄 (Age)
+    # 3. Patient age
     val_df['subgroup_age'] = val_df['patient_age'].apply(
         lambda a: '<45 (Young)' if a < 45 else ('45-65 (Middle)' if a <= 65 else '>65 (Senior)')
     )
 
     subgroup_metrics = []
-    # 临床四大亚组
+    # Four clinical subgroup categories.
     subgroup_categories = {
         'Nodule Size': 'subgroup_size',
         'Lung Location': 'lung_side',
@@ -233,4 +241,4 @@ if __name__ == "__main__":
     plt.savefig(subgroup_img_path, dpi=300, bbox_inches='tight')
     plt.close()
     
-    print(f"\n✅ 临床多亚组性能条形图 -> {subgroup_img_path}")
+    print(f"\n✅ Clinical subgroup performance chart -> {subgroup_img_path}")

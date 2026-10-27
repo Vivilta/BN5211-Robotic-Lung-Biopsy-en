@@ -215,7 +215,7 @@ def main():
                     .reshape(-1)
                 )
 
-                # 使用原始空间注意力权重，不上采样
+                # Use the original spatial attention weights without upsampling
                 spatial = (
                     extractor.spatial[layer]
                     .numpy()

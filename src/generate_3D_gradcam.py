@@ -49,7 +49,7 @@ if __name__ == "__main__":
     out_dir = "models/evaluation_results/grad_cam/"
     os.makedirs(out_dir, exist_ok=True)
     
-    # 加载模型
+    # Load the model.
     ckpt_dir = "models/checkpoints_attention/"
     ckpts = glob.glob(os.path.join(ckpt_dir, "*cbam*.ckpt"))
     ckpts.sort(key=os.path.getmtime)
@@ -58,13 +58,13 @@ if __name__ == "__main__":
     
     dataset = LungNodule3DDataset("data/processed/final_dataset_manifest.csv", "data/processed/all_roi_cubes/", transform=None)
     
-    # 收集样本用于生成对照图
-    gallery_data = [] # 存储 (Original, Heatmap, Overlay, Label)
+    # Collect samples for the comparison gallery.
+    gallery_data = [] # Stores (Original, Heatmap, Overlay, Label).
     for idx in range(len(dataset)):
         img_tensor, label = dataset[idx]
         is_malignant = (label.item() == 1)
         
-        # 简单选取前两个良性、两个恶性
+        # Select the first two benign and two malignant samples.
         if (is_malignant and len([x for x in gallery_data if x[3]==1]) < 2) or \
            (not is_malignant and len([x for x in gallery_data if x[3]==0]) < 2):
             cam_3d = grad_cam.generate(img_tensor.unsqueeze(0), target_class=label.item())
@@ -75,7 +75,7 @@ if __name__ == "__main__":
             
         if len(gallery_data) >= 4: break
 
-    # 绘制完整的对照大图 (Gallery)
+    # Plot the complete comparison gallery.
     fig, axes = plt.subplots(4, 3, figsize=(10, 12))
     titles = ["Original CT", "Grad-CAM", "Overlay"]
     
@@ -91,4 +91,4 @@ if __name__ == "__main__":
             
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, "GradCAM_Comparison_Gallery.png"), dpi=300)
-    print(f"✅ 生成完整的对照图 -> {out_dir}GradCAM_Comparison_Gallery.png")
+    print(f"✅ Complete comparison gallery generated -> {out_dir}GradCAM_Comparison_Gallery.png")

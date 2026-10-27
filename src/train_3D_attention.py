@@ -6,13 +6,13 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from dataset_3D import LungNodule3DDataset
-from train_3D import Transform3D # 借用之前写好的数据增强
+from train_3D import Transform3D # Reuse the previously defined data augmentation
 
 # ==============================================================
-# 🧠 1. 自定义 3D CBAM 注意力机制 (通道注意力 + 空间注意力)
+# 🧠 1. Custom 3D CBAM attention mechanism (channel attention + spatial attention)
 # ==============================================================
 
-# 1.1 通道注意力模块 (Channel Attention)
+# 1.1 Channel attention module (Channel Attention)
 class ChannelAttention3D(nn.Module):
     def __init__(self, in_planes, ratio=16):
         super(ChannelAttention3D, self).__init__()
@@ -32,13 +32,13 @@ class ChannelAttention3D(nn.Module):
         out = avg_out + max_out
         return self.sigmoid(out)
 
-# 1.2 空间注意力模块 (Spatial Attention)
+# 1.2 Spatial attention module (Spatial Attention)
 class SpatialAttention3D(nn.Module):
     def __init__(self, kernel_size=7):
         super(SpatialAttention3D, self).__init__()
         assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
         padding = 3 if kernel_size == 7 else 1
-        # 将通道在维度1拼接后压缩为单通道
+        # Concatenate channels along dimension 1, then reduce to a single channel
         self.conv1 = nn.Conv3d(2, 1, kernel_size, padding=padding, bias=False)
         self.sigmoid = nn.Sigmoid()
 
@@ -49,7 +49,7 @@ class SpatialAttention3D(nn.Module):
         x = self.conv1(x)
         return self.sigmoid(x)
 
-# 1.3 完整的 CBAM 模块
+# 1.3 Complete CBAM module
 class CBAM3D(nn.Module):
     def __init__(self, in_planes, ratio=16, kernel_size=7):
         super(CBAM3D, self).__init__()
@@ -62,35 +62,35 @@ class CBAM3D(nn.Module):
         return out
 
 # ==============================================================
-# 🏗️ 2. 构建带 CBAM 注意力机制的高级 3D ResNet18 模型
+# 🏗️ 2. Build an advanced 3D ResNet18 with CBAM attention
 # ==============================================================
 class AttentionResNet3D(nn.Module):
     def __init__(self, num_classes=2):
         super(AttentionResNet3D, self).__init__()
-        # 复用基础的 3D 卷积层
+        # Reuse the base 3D convolution layers
         self.stem = nn.Sequential(
             nn.Conv3d(1, 16, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm3d(16),
             nn.ReLU(inplace=True)
         )
         
-        # 这里的多层特征提取加入了 CBAM 注意力机制
+        # CBAM attention is added to multi-layer feature extraction here
         self.layer1 = nn.Sequential(
             nn.Conv3d(16, 32, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm3d(32),
             nn.ReLU(inplace=True),
-            CBAM3D(in_planes=32) # 注入强力 CBAM 模块
+            CBAM3D(in_planes=32) # Inject the CBAM module
         )
         
         self.layer2 = nn.Sequential(
             nn.Conv3d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm3d(64),
             nn.ReLU(inplace=True),
-            CBAM3D(in_planes=64) # 注入强力 CBAM 模块
+            CBAM3D(in_planes=64) # Inject the CBAM module
         )
         
         self.avgpool = nn.AdaptiveAvgPool3d(1)
-        # 注意这里改为了 num_classes (2 分类输出)
+        # Note that this uses num_classes (two-class output)
         self.fc = nn.Linear(64, num_classes)
 
     def forward(self, x):
@@ -103,14 +103,14 @@ class AttentionResNet3D(nn.Module):
         return x
 
 # ==============================================================
-# ⚡ 3. PyTorch Lightning 训练封装 (注意这里的输出匹配)
+# ⚡ 3. PyTorch Lightning training wrapper (ensure output dimensions match)
 # ==============================================================
 class LitAttentionModel(pl.LightningModule):
     def __init__(self, learning_rate=1e-3):
         super().__init__()
         self.save_hyperparameters()
         self.model = AttentionResNet3D(num_classes=2)
-        # 换回你之前习惯的二分类交叉熵
+        # Switch back to the binary cross-entropy loss used previously
         self.criterion = nn.CrossEntropyLoss()
         
     def forward(self, x):
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     MANIFEST_PATH = "data/processed/final_dataset_manifest.csv"
     CUBE_DIR = "data/processed/all_roi_cubes/"
     
-    # 强制固定随机种子，保证数据切分与 Baseline 完全一致
+    # Fix the random seed so the data split exactly matches the baseline
     torch.manual_seed(42)
     
     full_dataset = LungNodule3DDataset(manifest_path=MANIFEST_PATH, cube_dir=CUBE_DIR, transform=Transform3D())
@@ -171,7 +171,7 @@ if __name__ == "__main__":
         save_top_k=1, monitor='val_acc', mode='max'
     )
     
-    # 修改日志名称以示区分
+    # Update the log name to distinguish this run
     logger = TensorBoardLogger("models/logs/", name="advanced_3d_resnet_cbam")
     
     trainer = pl.Trainer(
@@ -179,5 +179,5 @@ if __name__ == "__main__":
         callbacks=[early_stop_callback, checkpoint_callback]
     )
     
-    print("🚀 正在训练【注入 3D CBAM 注意力机制】的高级网络...")
+    print("🚀 Training the advanced network with 3D CBAM attention...")
     trainer.fit(lit_model, train_loader, val_loader)

@@ -202,7 +202,7 @@ def main():
             for name in ["Layer 1", "Layer 2"]:
                 spatial = extractor.spatial[name]
 
-                # 上采样至原始 ROI 尺寸
+                # Upsample to the original ROI dimensions
                 spatial_up = F.interpolate(
                     spatial,
                     size=(32, 32, 32),

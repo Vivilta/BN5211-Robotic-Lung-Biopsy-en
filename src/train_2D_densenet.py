@@ -7,12 +7,12 @@ from torch.utils.data import DataLoader, random_split
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
-# 导入 2D 数据集与刚刚写好的 DenseNet121 模型
+# Import the 2D dataset and the DenseNet121 model defined above
 from dataset_2D import LungNodule2DDataset
 from model_2D_densenet import DenseNet2D121
 
 # ==========================================
-# 🧩 2D 数据增强
+# 🧩 2D data augmentation
 # ==========================================
 class Transform2D:
     def __call__(self, tensor):
@@ -23,14 +23,14 @@ class Transform2D:
         return tensor
 
 # ==========================================
-# 🧠 PyTorch Lightning DenseNet 封装
+# 🧠 PyTorch Lightning DenseNet wrapper
 # ==========================================
 class LitLungNoduleDenseNet2D(pl.LightningModule):
     def __init__(self, learning_rate=1e-3):
         super().__init__()
         self.save_hyperparameters()
         
-        # 🌟 热插拔：注入 DenseNet2D121 模型
+        # 🌟 Hot-swap in the DenseNet2D121 model
         self.model = DenseNet2D121(num_classes=2)
         self.criterion = nn.CrossEntropyLoss()
 
@@ -63,7 +63,7 @@ class LitLungNoduleDenseNet2D(pl.LightningModule):
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": "val_loss"}}
 
 # ==========================================
-# 🚀 自动化训练执行入口
+# 🚀 Automated training entry point
 # ==========================================
 if __name__ == "__main__":
     MANIFEST_PATH = "./data/processed/final_dataset_manifest.csv"
@@ -93,5 +93,5 @@ if __name__ == "__main__":
         callbacks=[early_stop_callback, checkpoint_callback]
     )
     
-    print("🚀 正在启动 2D-DenseNet121 训练流水线...")
+    print("🚀 Starting the 2D-DenseNet121 training pipeline...")
     trainer.fit(lit_model, train_loader, val_loader)

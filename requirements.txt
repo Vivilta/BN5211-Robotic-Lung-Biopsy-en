@@ -1,31 +1,31 @@
 # ==============================================================
-# 🫁 肺结节 3D 影像分类大作业 - Python 依赖清单
-# 推荐 Python 版本: 3.9.x
-# 安装命令: pip install -r requirements.txt
+# 🫁 Lung Nodule 3D Image Classification Project - Python Dependencies
+# Recommended Python version: 3.9.x
+# Installation command: pip install -r requirements.txt
 # ==============================================================
 
-# 1. 深度学习核心与底层框架 (Deep Learning & Lightning)
+# 1. Core deep learning frameworks (Deep Learning & Lightning)
 torch==2.1.0
 torchvision==0.16.0
 pytorch-lightning==2.1.0
 tensorboard==2.14.0
 
-# 2. 医疗影像处理基础 (Medical Imaging Processing)
+# 2. Medical imaging processing
 SimpleITK==2.3.1
 pydicom==2.4.3
 scikit-image==0.22.0
 
-# 3. 科学计算与数据处理 (Scientific Computing)
+# 3. Scientific computing and data processing
 numpy==1.26.0
 pandas==2.1.1
 scipy==1.11.3
 scikit-learn==1.3.1
 
-# 4. 可视化与图表分析 (Visualization)
+# 4. Visualization and plotting
 matplotlib==3.8.0
 seaborn==0.13.0
 
-# 5. 其他辅助工具 (Utilities)
+# 5. Other utilities
 PyYAML==6.0.1
 
 # Optional robot simulator bridge. CoppeliaSim also ships the same client in

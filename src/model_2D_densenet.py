@@ -4,12 +4,12 @@ import torch.nn.functional as F
 
 class DenseLayer2D(nn.Module):
     """
-    2D DenseNet 核心密集层 (BottleNeck 结构)
-    包含: 1x1 卷积压缩通道 -> 3x3 卷积提取特征
+    Core 2D DenseNet dense layer (bottleneck structure)
+    Includes: 1x1 convolution for channel compression -> 3x3 convolution for feature extraction
     """
     def __init__(self, in_channels, growth_rate):
         super(DenseLayer2D, self).__init__()
-        # DenseNet 经典设计：内部瓶颈通道数固定为 4 * growth_rate
+        # Classic DenseNet design: the internal bottleneck channel count is fixed at 4 * growth_rate
         inter_channels = 4 * growth_rate
         
         self.bn1 = nn.BatchNorm2d(in_channels)
@@ -19,23 +19,23 @@ class DenseLayer2D(nn.Module):
         self.conv2 = nn.Conv2d(inter_channels, growth_rate, kernel_size=3, padding=1, bias=False)
 
     def forward(self, x):
-        # x 为包含之前所有特征图拼接后的输入
+        # x is the input formed by concatenating all previous feature maps
         out = self.conv1(F.relu(self.bn1(x)))
         out = self.conv2(F.relu(self.bn2(out)))
-        # 在通道维度拼接原始输入与新提取的特征 (Dense Connection)
+        # Concatenate the original input and newly extracted features along the channel dimension (dense connection)
         return torch.cat([x, out], 1)
 
 
 class DenseBlock2D(nn.Module):
     """
-    2D DenseNet 密集块 (Dense Block)
-    由多个 DenseLayer 串联组成，每个层的输入都是前面所有层输出的叠加
+    2D DenseNet dense block
+    Composed of multiple DenseLayers in sequence; each layer receives the combined outputs of all preceding layers
     """
     def __init__(self, num_layers, in_channels, growth_rate):
         super(DenseBlock2D, self).__init__()
         layers = []
         for i in range(num_layers):
-            # 每经过一层，输入通道数增加 growth_rate
+            # The input channel count increases by growth_rate after each layer
             layers.append(DenseLayer2D(in_channels + i * growth_rate, growth_rate))
         self.block = nn.Sequential(*layers)
 
@@ -45,8 +45,8 @@ class DenseBlock2D(nn.Module):
 
 class Transition2D(nn.Module):
     """
-    2D 过渡层 (Transition Layer)
-    用于在两个 Dense Block 之间控制通道数并减半空间特征图的分辨率
+    2D transition layer
+    Controls channel count between Dense Blocks and halves the spatial feature-map resolution
     """
     def __init__(self, in_channels, out_channels):
         super(Transition2D, self).__init__()
@@ -62,71 +62,71 @@ class Transition2D(nn.Module):
 
 class DenseNet2D121(nn.Module):
     """
-    针对 2D 肺结节分类量身定制的轻量级 DenseNet-121 网络
+    A lightweight DenseNet-121 tailored for 2D lung nodule classification
     """
     def __init__(self, growth_rate=32, block_config=(6, 12, 24, 16), num_classes=2):
         super(DenseNet2D121, self).__init__()
         self.growth_rate = growth_rate
         
-        # 1. 初始前置 2D 卷积层 (输入通道 C=1，输出 64 维特征)
-        # 严格对齐医学图像单通道输入规范
+        # 1. Initial 2D convolution (input channel C=1, 64 output features)
+        # Strictly follows the single-channel medical image input convention
         self.conv1 = nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(64)
         
-        # 跟踪当前通道数
+        # Track the current channel count
         num_features = 64
         
-        # 2. 构建 Dense Blocks 与 Transitions
+        # 2. Build Dense Blocks and Transitions
         self.features = nn.Sequential()
         
-        # 逐层构建网络
+        # Build the network layer by layer
         for i, num_layers in enumerate(block_config):
-            # 添加 Dense Block
+            # Add a Dense Block
             block = DenseBlock2D(num_layers=num_layers, in_channels=num_features, growth_rate=growth_rate)
             self.features.add_module(f'denseblock{i+1}', block)
             num_features = num_features + num_layers * growth_rate
             
-            # 如果不是最后一个 Dense Block，在后面挂载 Transition 过渡层进行下采样
+            # If this is not the final Dense Block, append a Transition layer for downsampling
             if i != len(block_config) - 1:
-                # 压缩通道数（压缩率 0.5）
+                # Compress the channel count (compression rate 0.5)
                 trans = Transition2D(in_channels=num_features, out_channels=num_features // 2)
                 self.features.add_module(f'transition{i+1}', trans)
                 num_features = num_features // 2
                 
-        # 3. 全局平均池化与分类头
+        # 3. Global average pooling and classification head
         self.final_bn = nn.BatchNorm2d(num_features)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(num_features, num_classes)
 
     def forward(self, x):
-        # 初始特征提取
+        # Initial feature extraction
         out = F.relu(self.bn1(self.conv1(x)))
-        # 密集特征传导
+        # Dense feature propagation
         out = self.features(out)
         out = F.relu(self.final_bn(out))
-        # 池化与展平
+        # Pooling and flattening
         out = self.avgpool(out)
         out = torch.flatten(out, 1)
-        # 分类输出
+        # Classification output
         out = self.fc(out)
         return out
 
 # ==========================================
-# 本地模型前向传播测试 (Local Test Entry)
+# Local model forward-pass test (local test entry point)
 # ==========================================
 if __name__ == "__main__":
-    # 模拟一个 Batch 的 2D 横截面切片数据：Batch Size=4，单通道，大小为 32x32
+    # Create a batch of 2D cross-sectional slices: batch size 4, one channel, size 32x32
     mock_input = torch.randn(4, 1, 32, 32)
-    print("=== 2D DenseNet-121 架构测试 ===")
-    print(f"输入伪张量形状 (Input Shape): {mock_input.shape}")
+    print("=== 2D DenseNet-121 architecture test ===")
+    print(f"Input tensor shape: {mock_input.shape}")
     
-    # 初始化模型
+    # Initialize the model
     model = DenseNet2D121(num_classes=2)
     
-    # 前向传播测试
+    # Test the forward pass
     try:
         mock_output = model(mock_input)
-        print(f"输出分类张量形状 (Output Shape): {mock_output.shape}") # 期望输出: torch.Size([4, 2])
-        print("✅ 2D-DenseNet121 架构搭建成功，前向传播测试通过")
+        print(f"Output classification tensor shape: {mock_output.shape}") # Expected output: torch.Size([4, 2])
+        print("✅ 2D-DenseNet121 architecture built successfully; forward-pass test passed")
     except Exception as e:
-        print(f"❌ 架构测试失败: {e}")
+        print(f"❌ Architecture test failed: {e}")

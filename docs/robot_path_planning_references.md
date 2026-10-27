@@ -1,19 +1,19 @@
 # Robot path-planning references and proposed improvements
 
-## 文档目的 / Purpose
+## Purpose
 
-本文把当前项目的 CoppeliaSim 路径流程与公开文献、CoppeliaSim/OMPL 官方文档对照，形成可审查的改进依据。它不改变临床规划目标：针尖到达已配准的肺结节，针体与肋骨 AABB、机器人自身、安装板和患者碰撞体保持安全间隙。
+This document compares the project's current CoppeliaSim path-planning pipeline with published literature and official CoppeliaSim/OMPL documentation to provide an auditable basis for improvements. It does not change the clinical planning objective: the needle tip reaches the registered lung nodule while the needle, robot, mounting plate, and patient collision geometry maintain safe clearance from rib AABBs and one another.
 
 This note maps the current CoppeliaSim pipeline to peer-reviewed references and official CoppeliaSim/OMPL documentation. It preserves the clinical objective: reach the registered lung nodule while maintaining clearance from rib AABBs, the robot, the mounting plate, and patient collision geometry.
 
-## 当前实现 / Current implementation
+## Current implementation
 
 - `trajectory_planner.py` samples straight entry rays in the patient frame and tests a line segment against inflated AABBs with a slab test. The current score is dominated by needle length and, when supplied, angular deviation.
 - `create_coppeliasim_scene.py` enumerates needle roll/orientation and IK seeds, then rejects candidates using CoppeliaSim collision pairs and a fixed number of Cartesian samples along `approach -> entry -> target`.
 - `coppeliasim_remote.py` moves an IK target through Cartesian waypoints and checks robot/patient, needle/self and mounting collisions at sampled states.
 - This is a useful safety preflight, but it is not yet a global robot motion planner. The Cartesian line planner chooses the needle geometry; simIK solves poses locally; the robot's full transit in joint configuration space is not searched by OMPL.
 
-## 建议采用的规划结构 / Recommended planning structure
+## Recommended planning structure
 
 ### 1. Separate free-space transit from constrained insertion
 
@@ -53,7 +53,7 @@ The locally installed CoppeliaSim manual exposes the following useful calls:
 
 These calls are version-sensitive; verify the local manual before porting to another CoppeliaSim release.
 
-## 参考文献 / References
+## References
 
 ### Sampling-based planning and OMPL
 
@@ -96,7 +96,7 @@ These calls are version-sensitive; verify the local manual before porting to ano
 25. **CoppeliaSim motion-profile API (`sim.moveToConfig`):** [manual.coppeliarobotics.com/en/simMoveToConfig.htm](https://manual.coppeliarobotics.com/en/simMoveToConfig.htm). Use for velocity/acceleration/jerk-limited execution of a validated joint path.
 26. **CoppeliaSim API and collision functions:** [manual.coppeliarobotics.com/en/apiFunctions.htm](https://manual.coppeliarobotics.com/en/apiFunctions.htm). `sim.checkCollision` remains a discrete state query; pair definitions must include patient, robot/self, needle and mount geometry.
 
-## 采用顺序 / Implementation order
+## Implementation order
 
 1. **First:** multi-goal IK + OMPL RRT-Connect for `initial TCP -> approach`, with full collision pairs and start/goal validity checks.
 2. **Second:** adaptive state interpolation and clearance checks for the insertion polyline; uncertainty-inflated AABBs and surface-based entry sampling.
@@ -104,7 +104,7 @@ These calls are version-sensitive; verify the local manual before porting to ano
 4. **Fourth:** optional TrajOpt/CHOMP/STOMP local refinement and RRT*/Informed-RRT*-Connect comparison when path quality or repeated failures justify the extra computation.
 5. **Evaluation:** report first-solution success rate, end-to-target error, minimum clearance, IK failure rate, collision rejection rate, joint travel, execution time and jerk. Compare the current fixed-100-waypoint baseline against each change on the same registered cases and random seeds.
 
-## 限制 / Limitations
+## Limitations
 
 - CoppeliaSim's available OMPL algorithms and simIK options vary by release; verify the local plugin documentation before coding against an enum or function name.
 - AABB obstacles are conservative and can either reject safe paths or miss geometry outside the segmented boxes. They are not a substitute for validated rib surfaces or volumetric masks.

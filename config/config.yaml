@@ -4,6 +4,6 @@ data:
   processed_dir: "./data/processed"
 
 preprocessing:
-  min_diameter: 3            # 任务要求 6：提取直径≥3mm的结节
-  min_agreement_readers: 3   # 任务要求 6：至少3位放射科医生一致认可
-  label_mode: "binary"       # 构建二分类标签 (良性/恶性)
+  min_diameter: 3            # Task requirement 6: extract nodules with a diameter of at least 3 mm
+  min_agreement_readers: 3   # Task requirement 6: require agreement from at least 3 radiologists
+  label_mode: "binary"       # Build binary labels (benign/malignant)
